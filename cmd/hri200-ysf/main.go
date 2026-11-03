@@ -53,6 +53,8 @@ var (
 	desc       = flag.String("description", "HRI-200 sniff", "reflector description, in status replies")
 	dump       = flag.String("dump", "", "also write every frame as hex to this file")
 	fast       = flag.Bool("fast", false, "replay as fast as possible, keeping the captured timing (for -dump)")
+	oversDir   = flag.String("overs", "", "keep every transmission's frames under this directory, a subdirectory per day")
+	keep       = flag.Int("keep", 7, "with -overs: days of transmissions to keep")
 	verbose    = flag.Bool("v", false, "log every HRI-200 message")
 	cachePath  = flag.String("cache", "", "file to keep the HRI-200's replies in (learned in both modes)")
 	proxyMode  = flag.Bool("proxy", false, "proxy between WIRES-X (-downstream) and the HRI-200, instead of sniffing")
@@ -88,10 +90,17 @@ func main() {
 		defer f.Close()
 		dumpFile = f
 	}
+	var overs *overLog
+	if *oversDir != "" {
+		overs = &overLog{dir: *oversDir, keep: *keep, log: log.Printf}
+	}
 	b := &bridge.Bridge{Log: log.Printf, Out: func(p bridge.Packet) {
 		refl.Send(p)
 		if dumpFile != nil {
 			fmt.Fprintf(dumpFile, "%d %t %s\n", p.Seq, p.End, hex.EncodeToString(p.Frame))
+		}
+		if overs != nil {
+			overs.packet(p, time.Now())
 		}
 	}}
 
