@@ -1,16 +1,25 @@
-// Package reflector is a send-only YSF reflector: clients (YSFGateway, or
-// MMDVMHost directly) link with polls and receive every transmission the bridge
-// produces. Audio sent by clients is dropped.
+// Package reflector is a YSF reflector: clients (YSFGateway, or MMDVMHost
+// directly) link with polls and receive every transmission the bridge
+// produces. Audio from clients is passed to In only from linked clients whose
+// address Allow accepts; otherwise it is dropped.
 package reflector
 
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/lweith/hri200-ysf/internal/bridge"
 )
+
+// Frame is a YSF frame received from a client.
+type Frame struct {
+	Source [10]byte
+	Frame  []byte // 120 bytes
+	End    bool
+}
 
 // Expiry drops a client that hasn't polled for this long. Clients poll every 5 s.
 const Expiry = 60 * time.Second
@@ -22,6 +31,10 @@ type Reflector struct {
 	Name        string // 16 characters, in status replies
 	Description string // 14 characters, in status replies
 	Log         func(format string, args ...any)
+	// Allow lists the networks whose clients' audio goes to In. Empty: none.
+	Allow []netip.Prefix
+	// In receives audio from allowed, linked clients.
+	In func(Frame)
 
 	conn    *net.UDPConn
 	mu      sync.Mutex
@@ -75,12 +88,40 @@ func (r *Reflector) Serve() error {
 		case "YSFS":
 			r.status(addr)
 		case "YSFD":
+			if n >= 155 && r.In != nil && r.allowed(addr) {
+				var f Frame
+				copy(f.Source[:], p[14:24])
+				f.Frame = append([]byte(nil), p[35:155]...)
+				f.End = p[34]&1 != 0
+				r.In(f)
+				continue
+			}
 			if dropped%100 == 0 {
-				r.logf("dropping audio from %s: this reflector only sends", addr)
+				r.logf("dropping audio from %s: not a linked, allowed client", addr)
 			}
 			dropped++
 		}
 	}
+}
+
+// allowed reports whether audio from addr goes to In: it must be linked and
+// inside Allow.
+func (r *Reflector) allowed(addr *net.UDPAddr) bool {
+	ip := addr.AddrPort().Addr().Unmap()
+	ok := false
+	for _, p := range r.Allow {
+		if p.Contains(ip) {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return false
+	}
+	r.mu.Lock()
+	_, linked := r.clients[addr.String()]
+	r.mu.Unlock()
+	return linked
 }
 
 func callsign(p []byte) string {

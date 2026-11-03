@@ -40,8 +40,10 @@ type Packet struct {
 const DefaultTimeout = 400 * time.Millisecond
 
 type csd struct {
-	set  [3]bool
-	data [3][20]byte
+	set   [3]bool
+	data  [3][20]byte
+	dtSet bool
+	dt    [20]byte // frames 6 and 7, from D1G
 }
 
 type session struct {
@@ -80,14 +82,23 @@ func (b *Bridge) Handle(dir Direction, m hri.Message, now time.Time) {
 			return
 		}
 		b.setCSD(dir, c.Block-1, c.Text)
-	case dir == Network && m.Cmd == 'F':
-		h, ok := hri.ParseTxHeader(m)
-		if !ok {
-			return
-		}
+	case dir == Network && m.Cmd == 'F' && len(m.Payload) == 0x52:
+		h, _ := hri.ParseTxHeader(m)
 		b.setCSD(dir, 0, h.CSD1)
 		b.setCSD(dir, 1, h.CSD2)
 		b.setCSD(dir, 2, h.CSD3)
+	case m.Cmd == 'G' || (dir == Network && m.Cmd == 'F'):
+		// The callsign blocks and the DT data of frames 6 and 7: a D1G from
+		// either side about once per eight frames, or WIRES-X's long D1F
+		// header, which it repeats every few seconds.
+		d, ok := hri.ParseData(m)
+		if !ok {
+			return
+		}
+		b.setCSD(dir, 0, d.CSD1)
+		b.setCSD(dir, 1, d.CSD2)
+		b.setCSD(dir, 2, d.CSD3)
+		b.setDT(dir, d.DT)
 	case (dir == Radio && m.Cmd == 'R') || (dir == Network && m.Cmd == 'E'):
 		if len(m.Payload) == 1 {
 			return // an acknowledgement
@@ -118,6 +129,15 @@ func (b *Bridge) setCSD(dir Direction, i int, text [20]byte) {
 	if b.active != nil && b.active.dir == dir {
 		b.active.csd.data[i] = text
 		b.active.csd.set[i] = true
+	}
+}
+
+func (b *Bridge) setDT(dir Direction, dt [20]byte) {
+	b.pending[dir].dt = dt
+	b.pending[dir].dtSet = true
+	if b.active != nil && b.active.dir == dir {
+		b.active.csd.dt = dt
+		b.active.csd.dtSet = true
 	}
 }
 
@@ -187,12 +207,16 @@ func (s *session) dest() [10]byte {
 }
 
 // dch is the data channel of frame number fn: the callsign data blocks in
-// halves for 0-5. Frames 6 and 7 carry data (such as position) that this
-// bridge doesn't decode, so they are left blank.
+// halves for 0-5, and for 6 and 7 the DT data from the last D1G, blank until
+// one arrives.
 func (s *session) dch(fn byte) [10]byte {
 	var d [10]byte
 	if fn > 5 {
-		return spaces
+		if !s.csd.dtSet {
+			return spaces
+		}
+		copy(d[:], s.csd.dt[10*(fn-6):10*(fn-6)+10])
+		return d
 	}
 	b := s.block(int(fn / 2))
 	copy(d[:], b[10*(fn%2):10*(fn%2)+10])

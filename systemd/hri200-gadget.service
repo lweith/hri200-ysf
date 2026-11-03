@@ -1,0 +1,12 @@
+[Unit]
+Description=USB gadget standing in for the HRI-200's serial side (26aa:0002)
+Documentation=https://github.com/lweith/hri200-ysf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/hri200-gadget up
+ExecStop=/usr/local/sbin/hri200-gadget down
+
+[Install]
+WantedBy=multi-user.target

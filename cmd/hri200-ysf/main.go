@@ -1,24 +1,40 @@
-// hri200-ysf sniffs the serial traffic between WIRES-X and a Yaesu HRI-200
-// with usbmon and serves it as a send-only YSF reflector. It never writes to
-// the HRI-200.
+// hri200-ysf turns the serial traffic between WIRES-X and a Yaesu HRI-200 into
+// YSF, served as a small YSF reflector.
+//
+// Sniffer (default): reads the traffic with usbmon and never writes to the
+// HRI-200. With -cache it also learns the HRI-200's replies, for the proxy.
 //
 //	hri200-ysf                          live, from the HRI-200's usbmon bus (root)
 //	hri200-ysf -pcap capture.pcap       replay a tcpdump capture in real time
+//
+// Proxy (-proxy): sits between WIRES-X, which talks to a USB gadget standing in
+// for the HRI-200, and the HRI-200 when it is attached. Attached, everything
+// passes through and the replies are cached; absent, the proxy answers WIRES-X
+// itself and plays YSF from -allow'ed clients to it as received audio.
+//
+//	hri200-ysf -proxy -cache /var/lib/hri200-ysf/cache.json -allow 10.99.0.0/24
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net/netip"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lweith/hri200-ysf/internal/bridge"
 	"github.com/lweith/hri200-ysf/internal/hri"
+	"github.com/lweith/hri200-ysf/internal/proxy"
 	"github.com/lweith/hri200-ysf/internal/reflector"
+	"github.com/lweith/hri200-ysf/internal/serial"
 	"github.com/lweith/hri200-ysf/internal/usbmon"
 )
 
@@ -27,22 +43,112 @@ type source interface {
 	Close() error
 }
 
+var (
+	device     = flag.String("usbmon", "auto", "usbmon device, or auto to find the HRI-200's bus")
+	pcap       = flag.String("pcap", "", "replay this usbmon capture instead of sniffing live")
+	listen     = flag.String("listen", ":42000", "UDP address to serve YSF clients on")
+	gateway    = flag.String("gateway", "HRI200", "callsign in the packets' gateway field")
+	id         = flag.Int("id", 99999, "reflector ID, in status replies")
+	name       = flag.String("name", "HRI200", "reflector name, in status replies")
+	desc       = flag.String("description", "HRI-200 sniff", "reflector description, in status replies")
+	dump       = flag.String("dump", "", "also write every frame as hex to this file")
+	fast       = flag.Bool("fast", false, "replay as fast as possible, keeping the captured timing (for -dump)")
+	verbose    = flag.Bool("v", false, "log every HRI-200 message")
+	cachePath  = flag.String("cache", "", "file to keep the HRI-200's replies in (learned in both modes)")
+	proxyMode  = flag.Bool("proxy", false, "proxy between WIRES-X (-downstream) and the HRI-200, instead of sniffing")
+	downstream = flag.String("downstream", "/dev/ttyGS0", "with -proxy: the tty WIRES-X talks to (the USB gadget)")
+	upstream   = flag.String("upstream", "auto", "with -proxy: the HRI-200's tty, or auto to find it by USB ID")
+	allow      = flag.String("allow", "", "with -proxy: comma-separated networks whose YSF audio is played to WIRES-X")
+)
+
 func main() {
-	var (
-		device  = flag.String("usbmon", "auto", "usbmon device, or auto to find the HRI-200's bus")
-		pcap    = flag.String("pcap", "", "replay this usbmon capture instead of sniffing live")
-		listen  = flag.String("listen", ":42000", "UDP address to serve YSF clients on")
-		gateway = flag.String("gateway", "HRI200", "callsign in the packets' gateway field")
-		id      = flag.Int("id", 99999, "reflector ID, in status replies")
-		name    = flag.String("name", "HRI200", "reflector name, in status replies")
-		desc    = flag.String("description", "HRI-200 sniff", "reflector description, in status replies")
-		dump    = flag.String("dump", "", "also write every frame as hex to this file")
-		fast    = flag.Bool("fast", false, "replay as fast as possible, keeping the captured timing (for -dump)")
-		verbose = flag.Bool("v", false, "log every HRI-200 message")
-	)
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
+	cache, err := proxy.LoadCache(*cachePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *cachePath != "" {
+		log.Printf("cache %s: %d replies", *cachePath, cache.Len())
+	}
+
+	refl := &reflector.Reflector{Gateway: *gateway, ID: *id, Name: *name, Description: *desc, Log: log.Printf}
+	if err := refl.Listen(*listen); err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("serving YSF on %s", refl.Addr())
+
+	var dumpFile io.Writer
+	if *dump != "" {
+		f, err := os.Create(*dump)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		dumpFile = f
+	}
+	b := &bridge.Bridge{Log: log.Printf, Out: func(p bridge.Packet) {
+		refl.Send(p)
+		if dumpFile != nil {
+			fmt.Fprintf(dumpFile, "%d %t %s\n", p.Seq, p.End, hex.EncodeToString(p.Frame))
+		}
+	}}
+
+	if *proxyMode {
+		runProxy(refl, b, cache)
+		return
+	}
+	go func() { log.Fatal(refl.Serve()) }()
+	sniff(b, cache)
+}
+
+func runProxy(refl *reflector.Reflector, b *bridge.Bridge, cache *proxy.Cache) {
+	for _, s := range strings.Split(*allow, ",") {
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			log.Fatalf("-allow: %v", err)
+		}
+		refl.Allow = append(refl.Allow, p)
+	}
+	ysfIn := make(chan proxy.YSF, 64)
+	refl.In = func(f reflector.Frame) {
+		select {
+		case ysfIn <- proxy.YSF{Source: f.Source, Frame: f.Frame, End: f.End}:
+		default: // never block the reflector
+		}
+	}
+	go func() { log.Fatal(refl.Serve()) }()
+
+	find := func() (string, error) {
+		if *upstream != "auto" {
+			if _, err := os.Stat(*upstream); err != nil {
+				return "", err
+			}
+			return *upstream, nil
+		}
+		return serial.FindTTY("26aa", "0002")
+	}
+	p := &proxy.Proxy{
+		Downstream: *downstream,
+		Upstream:   find,
+		Open:       serial.Open,
+		Cache:      cache,
+		Bridge:     b,
+		Log:        log.Printf,
+		Verbose:    *verbose,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := p.Run(ctx, ysfIn); err != nil && !errors.Is(err, context.Canceled) {
+		log.Fatal(err)
+	}
+}
+
+func sniff(b *bridge.Bridge, cache *proxy.Cache) {
 	var src source
 	var err error
 	live := *pcap == ""
@@ -65,23 +171,11 @@ func main() {
 		log.Fatal(err)
 	}
 	defer src.Close()
-
-	refl := &reflector.Reflector{Gateway: *gateway, ID: *id, Name: *name, Description: *desc, Log: log.Printf}
-	if err := refl.Listen(*listen); err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("serving YSF on %s", refl.Addr())
-	go func() { log.Fatal(refl.Serve()) }()
-
-	var dumpFile io.Writer
-	if *dump != "" {
-		f, err := os.Create(*dump)
-		if err != nil {
-			log.Fatal(err)
+	defer func() {
+		if err := cache.Save(); err != nil {
+			log.Printf("saving cache: %v", err)
 		}
-		defer f.Close()
-		dumpFile = f
-	}
+	}()
 
 	events := make(chan usbmon.Event, 1024)
 	go func() {
@@ -116,15 +210,11 @@ func main() {
 		}
 	}()
 
-	b := &bridge.Bridge{Log: log.Printf, Out: func(p bridge.Packet) {
-		refl.Send(p)
-		if dumpFile != nil {
-			fmt.Fprintf(dumpFile, "%d %t %s\n", p.Seq, p.End, hex.EncodeToString(p.Frame))
-		}
-	}}
+	var match proxy.Matcher
 	splitters := map[[2]byte]*hri.Splitter{}
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
+	lastSave := time.Now()
 	for {
 		select {
 		case e, ok := <-events:
@@ -147,17 +237,27 @@ func main() {
 				dir = bridge.Radio
 			}
 			for _, text := range s.Write(e.Payload()) {
-				m, ok := hri.Parse(text)
 				if *verbose {
 					log.Printf("%s: %.60s", dir, text)
 				}
-				if ok {
+				if dir == bridge.Network {
+					match.Request(text, e.Time)
+				} else if req, ok := match.Reply(text, e.Time); ok {
+					cache.Learn(req, text)
+				}
+				if m, ok := hri.Parse(text); ok {
 					b.Handle(dir, m, e.Time)
 				}
 			}
 		case now := <-tick.C:
 			if !*fast {
 				b.Tick(now)
+			}
+			if now.Sub(lastSave) > 10*time.Second {
+				if err := cache.Save(); err != nil {
+					log.Printf("saving cache: %v", err)
+				}
+				lastSave = now
 			}
 		}
 	}

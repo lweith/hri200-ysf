@@ -1,0 +1,55 @@
+#!/bin/sh
+# hri200-gadget up|down
+#
+# Presents the HRI-200's serial side (26aa:0002, CDC ACM) as a USB gadget on
+# dummy_hcd, for passing to the WIRES-X VM in place of the real one. Its
+# host end appears on the dummy bus; the gadget end is /dev/ttyGS0, which
+# hri200-ysf -proxy opens. Windows binds usbser.sys to it by VID/PID through
+# Yaesu's INF, so only the IDs and strings need to match.
+set -eu
+
+G=/sys/kernel/config/usb_gadget/hri200
+
+up() {
+	modprobe libcomposite
+	modprobe dummy_hcd
+	if [ -e "$G/UDC" ] && [ -n "$(cat "$G/UDC")" ]; then
+		return 0 # already bound
+	fi
+	mkdir -p "$G"
+	echo 0x26aa >"$G/idVendor"
+	echo 0x0002 >"$G/idProduct"
+	echo 0x0000 >"$G/bcdDevice"
+	echo 0x0200 >"$G/bcdUSB"
+	echo 0x02 >"$G/bDeviceClass"
+	echo 0x00 >"$G/bDeviceSubClass"
+	echo 0x00 >"$G/bDeviceProtocol"
+	mkdir -p "$G/strings/0x409"
+	echo "YAESU MUSEN Co., Ltd." >"$G/strings/0x409/manufacturer"
+	echo "HRI-200 Communication device A" >"$G/strings/0x409/product"
+	mkdir -p "$G/configs/c.1"
+	echo 0x80 >"$G/configs/c.1/bmAttributes"
+	echo 100 >"$G/configs/c.1/MaxPower"
+	mkdir -p "$G/functions/acm.usb0"
+	[ -e "$G/configs/c.1/acm.usb0" ] || ln -s "$G/functions/acm.usb0" "$G/configs/c.1/"
+	udc=$(ls /sys/class/udc | grep '^dummy_udc' | head -n 1)
+	[ -n "$udc" ] || { echo "no dummy_udc: is dummy_hcd loaded?" >&2; exit 1; }
+	echo "$udc" >"$G/UDC"
+}
+
+down() {
+	[ -d "$G" ] || return 0
+	[ -z "$(cat "$G/UDC")" ] || echo "" >"$G/UDC"
+	rm -f "$G/configs/c.1/acm.usb0"
+	rmdir "$G/configs/c.1" "$G/functions/acm.usb0" "$G/strings/0x409" 2>/dev/null || true
+	rmdir "$G"
+}
+
+case "${1:-}" in
+up) up ;;
+down) down ;;
+*)
+	echo "usage: $0 up|down" >&2
+	exit 2
+	;;
+esac

@@ -1,0 +1,43 @@
+[Unit]
+Description=HRI-200 caching proxy and YSF gateway
+Documentation=https://github.com/lweith/hri200-ysf
+Requires=hri200-gadget.service
+After=hri200-gadget.service network-online.target
+Wants=network-online.target
+# Both serve YSF on the same port.
+Conflicts=hri200-ysf.service
+
+[Service]
+# Site settings, such as HRI200_YSF_ARGS="-allow 10.99.0.0/24".
+EnvironmentFile=-/etc/default/hri200-ysf
+ExecStart=/usr/local/bin/hri200-ysf -proxy -cache /var/lib/hri200-ysf/cache.json $HRI200_YSF_ARGS
+Restart=always
+RestartSec=2
+StateDirectory=hri200-ysf
+StateDirectoryMode=0700
+
+# Root for the ttys: the gadget's ttyGS0 and the HRI-200's ttyACM.
+DevicePolicy=closed
+DeviceAllow=char-ttyGS rw
+DeviceAllow=char-ttyACM rw
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
