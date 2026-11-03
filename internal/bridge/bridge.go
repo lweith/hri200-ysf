@@ -191,11 +191,11 @@ var spaces = [10]byte{' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '}
 func (s *session) block(i int) [20]byte {
 	if s.csd.set[i] {
 		b := s.csd.data[i]
-		// A radio's destination is "**********" (everyone) or "*****" and
-		// a radio ID. WIRES-X sometimes sends the room and an ID instead
-		// ("12345ABCDE"), and Yaesu radios show no callsigns for those, so
-		// they go out addressed to everyone.
-		if i == 0 && string(b[:5]) != "*****" {
+		// WIRES-X's destination is "*****" and a radio ID, or the room and
+		// an ID ("12345ABCDE"), with the group call mode. Yaesu radios show
+		// no callsigns for either, so everything goes out addressed to
+		// everyone ("**********").
+		if i == 0 {
 			copy(b[:10], "**********")
 		}
 		return b

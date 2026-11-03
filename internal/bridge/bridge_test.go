@@ -96,7 +96,7 @@ func TestLongNetworkHeader(t *testing.T) {
 	if err1 != nil || err2 != nil {
 		t.Fatalf("header: %v %v", err1, err2)
 	}
-	if csd1 != block("*****ABCDE", "N0CALL") || csd2 != block("N0GW", "N0UP") {
+	if csd1 != block("**********", "N0CALL") || csd2 != block("N0GW", "N0UP") {
 		t.Errorf("header CSD %q %q", csd1, csd2)
 	}
 	checkFrame(t, collected[2], 1, 7, []byte("N0CALL    "))
@@ -124,13 +124,12 @@ func TestNoRecord(t *testing.T) {
 	}
 }
 
-// WIRES-X sometimes puts the room and an ID in the destination; it goes out
-// addressed to everyone, since radios show no callsigns otherwise. A radio
-// ID destination is kept.
-func TestRoomDestination(t *testing.T) {
+// WIRES-X puts a radio ID or the room and an ID in the destination; it goes
+// out addressed to everyone, since radios show no callsigns otherwise.
+func TestDestinationEveryone(t *testing.T) {
 	for dest, want := range map[string]string{
 		"12345ABCDE": "**********",
-		"*****ABCDE": "*****ABCDE",
+		"*****ABCDE": "**********",
 		"**********": "**********",
 	} {
 		header := hri.DataPayload("21216000", block(dest, "N0CALL"), block("N0GW", "N0UP"), block("", ""), [20]byte{})
