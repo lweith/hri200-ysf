@@ -167,6 +167,14 @@ func (b *Bridge) end() {
 	b.send(ysf.HeaderFrame(s.fich(ysf.FITerminator, s.fn), s.block(0), s.block(1)), true)
 	b.logf("%s: end, %d frames, %.1f s", s.dir, s.count, s.last.Sub(s.start).Seconds()+0.1)
 	b.active = nil
+	if s.dir == Network {
+		// WIRES-X sometimes pauses mid-transmission long enough to end it
+		// here, then carries on without a new header. Keep the callsigns for
+		// that; a new transmission always starts with a header that replaces
+		// them. The DT record is the transmitting radio's, so it goes.
+		b.pending[s.dir].dt, b.pending[s.dir].dtSet = [20]byte{}, false
+		return
+	}
 	b.pending[s.dir] = csd{}
 }
 

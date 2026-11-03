@@ -146,6 +146,51 @@ func TestRoomDestination(t *testing.T) {
 	}
 }
 
+// When WIRES-X pauses long enough to end a transmission and carries on
+// without a new header, the continuation keeps the callsigns but not the DT
+// record.
+func TestContinuationKeepsCallsigns(t *testing.T) {
+	var collected []Packet
+	b := &Bridge{Out: func(p Packet) { collected = append(collected, p) }}
+	now := time.Unix(0, 0)
+	header := hri.DataPayload("21216000", block("**********", "N0CALL"), block("N0GW", "N0UP"), block("", ""), record(15))
+	b.Handle(Network, message(t, 'F', header), now)
+	var blocks [5][13]byte
+	voice := message(t, 'E', hri.VoicePayload(5, blocks))
+	b.Handle(Network, voice, now)
+	b.Tick(now.Add(time.Second))
+	if len(collected) != 3 || !collected[2].End {
+		t.Fatalf("got %d packets, want header, voice, terminator", len(collected))
+	}
+
+	collected = nil
+	b.Handle(Network, voice, now.Add(2*time.Second))
+	if got := string(collected[0].Source[:]); got != "N0CALL    " {
+		t.Errorf("continuation source %q, want N0CALL", got)
+	}
+	f, err := ysf.DecodeFICH(collected[1].Frame)
+	if err != nil || f.FT != 6 {
+		t.Errorf("continuation FT %d (%v), want 6: the GPS record is dropped", f.FT, err)
+	}
+}
+
+// Traffic the radio receives starts clean each time.
+func TestRadioDoesNotKeepCallsigns(t *testing.T) {
+	var collected []Packet
+	b := &Bridge{Out: func(p Packet) { collected = append(collected, p) }}
+	now := time.Unix(0, 0)
+	b.Handle(Radio, message(t, 'H', hri.CallsignPayload(hri.RadioPrefix, 1, 0, block("**********", "N0CALL"))), now)
+	var blocks [5][13]byte
+	voice := message(t, 'R', hri.VoicePayload(5, blocks))
+	b.Handle(Radio, voice, now)
+	b.Tick(now.Add(time.Second))
+	collected = nil
+	b.Handle(Radio, voice, now.Add(2*time.Second))
+	if got := string(collected[0].Source[:]); got != "UNKNOWN   " {
+		t.Errorf("source %q, want UNKNOWN", got)
+	}
+}
+
 // A valid short record from WIRES-X is passed on in frame 6.
 func TestShortRecord(t *testing.T) {
 	dt := record(9)
