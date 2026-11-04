@@ -9,6 +9,7 @@ import (
 
 	"github.com/lweith/hri200-ysf/internal/bridge"
 	"github.com/lweith/hri200-ysf/internal/hri"
+	"github.com/lweith/hri200-ysf/internal/usage"
 )
 
 // YSF is a frame from a YSF client, to play to WIRES-X.
@@ -31,6 +32,8 @@ type Proxy struct {
 	// Transmit also transmits clients' overs on the HRI-200's radio while it
 	// is attached, so the repeater hears both sides.
 	Transmit bool
+	// Usage, if set, times the repeater's overs from the HRI-200's states.
+	Usage *usage.Tracker
 }
 
 func (p *Proxy) logf(format string, args ...any) {
@@ -107,9 +110,15 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 						}
 					}
 				}
+				if p.Usage != nil {
+					p.Usage.Attached()
+				}
 				p.logf("proxy: HRI-200 attached (%s): passing through", f.Name())
 			} else {
 				up = nil
+				if p.Usage != nil {
+					p.Usage.Detached(time.Now())
+				}
 				if share != nil {
 					send(share.End(time.Now()))
 					share = nil
@@ -145,6 +154,9 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 			}
 			if pm, ok := hri.Parse(m.text); ok {
 				p.Bridge.Handle(bridge.Radio, pm, m.at)
+				if st, ok := hri.ParseState(pm); ok && p.Usage != nil {
+					p.Usage.State(st, m.at, share != nil && share.Relaying())
+				}
 			}
 			if req, ok := match.Reply(m.text, m.at); ok {
 				p.Cache.Learn(req, m.text)

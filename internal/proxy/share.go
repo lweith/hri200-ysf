@@ -43,6 +43,10 @@ func (s *Sharer) logf(format string, args ...any) {
 	}
 }
 
+// Relaying reports whether a client's over is being transmitted on the
+// repeater, until the radio reports the transmission over.
+func (s *Sharer) Relaying() bool { return s.relay.on }
+
 // Injecting reports whether a client's over is being played to WIRES-X.
 func (s *Sharer) Injecting() bool { return s.emu.rx != nil }
 

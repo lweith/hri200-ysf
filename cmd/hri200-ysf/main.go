@@ -14,6 +14,10 @@
 // received audio, while attached only when the repeater is idle.
 //
 //	hri200-ysf -proxy -cache /var/lib/hri200-ysf/cache.json -allow 10.99.0.0/24
+//
+// With -metrics the proxy also serves how the repeater is used, timed from the
+// HRI-200's states: overs received off the air (analog or digital) and
+// transmitted for WIRES-X or for clients.
 package main
 
 import (
@@ -24,6 +28,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -36,6 +42,7 @@ import (
 	"github.com/lweith/hri200-ysf/internal/proxy"
 	"github.com/lweith/hri200-ysf/internal/reflector"
 	"github.com/lweith/hri200-ysf/internal/serial"
+	"github.com/lweith/hri200-ysf/internal/usage"
 	"github.com/lweith/hri200-ysf/internal/usbmon"
 )
 
@@ -63,6 +70,7 @@ var (
 	upstream   = flag.String("upstream", "auto", "with -proxy: the HRI-200's tty, or auto to find it by USB ID")
 	allow      = flag.String("allow", "", "with -proxy: comma-separated networks whose YSF audio is played to WIRES-X")
 	transmit   = flag.Bool("transmit", false, "with -proxy: also transmit -allow'ed clients' overs on the HRI-200's radio, so the repeater hears them")
+	metrics    = flag.String("metrics", "", "with -proxy: serve the repeater's usage as Prometheus metrics on this TCP address, at /metrics")
 )
 
 func main() {
@@ -152,6 +160,17 @@ func runProxy(refl *reflector.Reflector, b *bridge.Bridge, cache *proxy.Cache) {
 		Log:        log.Printf,
 		Verbose:    *verbose,
 		Transmit:   *transmit,
+	}
+	if *metrics != "" {
+		p.Usage = &usage.Tracker{}
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", p.Usage)
+		ln, err := net.Listen("tcp", *metrics)
+		if err != nil {
+			log.Fatalf("-metrics: %v", err)
+		}
+		log.Printf("serving metrics on http://%s/metrics", ln.Addr())
+		go func() { log.Fatal(http.Serve(ln, mux)) }()
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
