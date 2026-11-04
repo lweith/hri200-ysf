@@ -35,10 +35,8 @@ const (
 
 	pttOn  = "P100000" // transmit voice (WIRES-X sends "P110000" for data)
 	pttOff = "P010000" // receive: also WIRES-X's idle poll
-	// pttEvery repeats pttOn while keyed. WIRES-X repeats it every second.
-	// This is twice as often, from a wrong guess at why the radio stopped
-	// (see headerAgain); not yet put back to WIRES-X's cadence.
-	pttEvery = 500 * time.Millisecond
+	// pttEvery repeats pttOn while keyed, as WIRES-X does.
+	pttEvery = time.Second
 	// pttHang unkeys this long after the last voice frame, as WIRES-X does.
 	pttHang = time.Second
 
