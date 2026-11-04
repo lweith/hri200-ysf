@@ -21,6 +21,9 @@ const wiresxHold = 3 * time.Second
 // loses it, waits and starts late, from its header, once the channel is free.
 type Sharer struct {
 	Log func(format string, args ...any)
+	// Radio, if set, writes a message to the HRI-200, and clients' overs are
+	// transmitted on the repeater too: see share_relay.go.
+	Radio func(text string)
 
 	emu      Emulator
 	radio    hri.State // as the HRI-200 last reported it
@@ -30,7 +33,8 @@ type Sharer struct {
 	waiting  bool      // the current client over is waiting for the channel
 	lastYSF  time.Time
 
-	wx wxState // WIRES-X commands from clients: see share_wiresx.go
+	wx    wxState    // WIRES-X commands from clients: see share_wiresx.go
+	relay relayState // clients' overs on the repeater: see share_relay.go
 }
 
 func (s *Sharer) logf(format string, args ...any) {
@@ -58,11 +62,16 @@ func (s *Sharer) FromWIRESX(text string, now time.Time) (bool, []Out) {
 	if out, taken := s.wiresxReply(text, now); taken {
 		return false, out
 	}
+	if taken, out := s.relayPoll(text, now); taken {
+		return false, out
+	}
 	switch hri.Key(text) {
 	case "D1E", "D1F":
 		if hri.IsAck(text) {
 			return true, nil
 		}
+		s.learnDownlink(text)
+		s.relayStop()
 		s.wiresxAt = now
 		s.txSeen = false
 		if s.emu.rx != nil {
@@ -79,6 +88,9 @@ func (s *Sharer) FromWIRESX(text string, now time.Time) (bool, []Out) {
 // FromRadio passes on a message from the HRI-200, rewritten or held back while
 // a client's over is being played so WIRES-X sees one consistent radio.
 func (s *Sharer) FromRadio(text string, now time.Time) []Out {
+	if out, taken := s.relayFromRadio(text, now); taken {
+		return out
+	}
 	if m, ok := hri.Parse(text); ok {
 		if st, ok := hri.ParseState(m); ok {
 			s.radio = st
@@ -104,7 +116,9 @@ func (s *Sharer) FromRadio(text string, now time.Time) []Out {
 		// The repeater has the channel: end the injected over first.
 		s.logf("proxy: repeater busy, holding the injected over")
 		s.waiting = true
-		return append(s.emu.endRx(now), Out{text, now})
+		out := s.emu.endRx(now)
+		s.relaySync()
+		return append(out, Out{text, now})
 	}
 	return []Out{{text, now}}
 }
@@ -137,9 +151,13 @@ func (s *Sharer) FromClient(y YSF, now time.Time) []Out {
 		if s.header != nil {
 			s.logf("proxy: channel free, starting %q's over late", string(y.Source[:]))
 			out = s.emu.Inject(s.header, y.Source, false, now)
+			s.relayFrom(out, now)
 		}
 	}
-	return append(out, s.emu.Inject(y.Frame, y.Source, y.End, now)...)
+	more := s.emu.Inject(y.Frame, y.Source, y.End, now)
+	s.relayFrom(more, now)
+	s.relaySync()
+	return append(out, more...)
 }
 
 // Tick ends an injected over whose frames have stopped, forgets a waiting
@@ -150,12 +168,15 @@ func (s *Sharer) Tick(now time.Time) ([]Out, []bridge.Packet) {
 		s.header, s.waiting = nil, false
 	}
 	out := s.emu.Tick(now)
+	s.relaySync()
+	s.relayTick(now)
 	wxOut, packets := s.wiresxTick(now)
 	return append(out, wxOut...), packets
 }
 
 // End ends an injected over, for when the HRI-200 goes away.
 func (s *Sharer) End(now time.Time) []Out {
+	s.relayStop()
 	if s.emu.rx == nil {
 		return nil
 	}

@@ -28,6 +28,9 @@ type Proxy struct {
 	Bridge     *bridge.Bridge
 	Log        func(format string, args ...any)
 	Verbose    bool
+	// Transmit also transmits clients' overs on the HRI-200's radio while it
+	// is attached, so the repeater hears both sides.
+	Transmit bool
 }
 
 func (p *Proxy) logf(format string, args ...any) {
@@ -93,6 +96,17 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 				up = f
 				share = &Sharer{Log: p.Log}
 				share.emu.Log = p.Log
+				if p.Transmit {
+					radio := f
+					share.Radio = func(text string) {
+						if p.Verbose {
+							p.logf("to radio: %.60s", text)
+						}
+						if _, err := radio.Write(hri.Wrap(text)); err != nil {
+							p.logf("proxy: writing to HRI-200: %v", err)
+						}
+					}
+				}
 				p.logf("proxy: HRI-200 attached (%s): passing through", f.Name())
 			} else {
 				up = nil

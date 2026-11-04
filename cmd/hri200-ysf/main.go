@@ -62,6 +62,7 @@ var (
 	downstream = flag.String("downstream", "/dev/ttyGS0", "with -proxy: the tty WIRES-X talks to (the USB gadget)")
 	upstream   = flag.String("upstream", "auto", "with -proxy: the HRI-200's tty, or auto to find it by USB ID")
 	allow      = flag.String("allow", "", "with -proxy: comma-separated networks whose YSF audio is played to WIRES-X")
+	transmit   = flag.Bool("transmit", false, "with -proxy: also transmit -allow'ed clients' overs on the HRI-200's radio, so the repeater hears them")
 )
 
 func main() {
@@ -150,6 +151,7 @@ func runProxy(refl *reflector.Reflector, b *bridge.Bridge, cache *proxy.Cache) {
 		Bridge:     b,
 		Log:        log.Printf,
 		Verbose:    *verbose,
+		Transmit:   *transmit,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
