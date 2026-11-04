@@ -10,7 +10,8 @@
 // Proxy (-proxy): sits between WIRES-X, which talks to a USB gadget standing in
 // for the HRI-200, and the HRI-200 when it is attached. Attached, everything
 // passes through and the replies are cached; absent, the proxy answers WIRES-X
-// itself and plays YSF from -allow'ed clients to it as received audio.
+// itself. Either way it plays YSF from -allow'ed clients to WIRES-X as
+// received audio, while attached only when the repeater is idle.
 //
 //	hri200-ysf -proxy -cache /var/lib/hri200-ysf/cache.json -allow 10.99.0.0/24
 package main

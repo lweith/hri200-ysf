@@ -41,8 +41,9 @@ type msg struct {
 	at   time.Time
 }
 
-// Run proxies until ctx ends. ysfIn carries frames to play to WIRES-X while
-// the HRI-200 is absent.
+// Run proxies until ctx ends. ysfIn carries frames to play to WIRES-X: always
+// while the HRI-200 is absent, and while it is attached whenever the repeater
+// is idle (see Sharer).
 func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 	down, err := p.Open(p.Downstream)
 	if err != nil {
@@ -64,7 +65,7 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 	emu := &Emulator{Cache: p.Cache, Log: p.Log}
 	var match Matcher
 	var up *os.File
-	var droppedYSF bool
+	var share *Sharer // while the HRI-200 is attached
 	send := func(o []Out) {
 		for _, x := range o {
 			if p.Verbose {
@@ -90,9 +91,15 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 		case f := <-upEvents:
 			if f != nil {
 				up = f
+				share = &Sharer{Log: p.Log}
+				share.emu.Log = p.Log
 				p.logf("proxy: HRI-200 attached (%s): passing through", f.Name())
 			} else {
 				up = nil
+				if share != nil {
+					send(share.End(time.Now()))
+					share = nil
+				}
 				match = Matcher{}
 				p.logf("proxy: HRI-200 gone: emulating from %d cached replies", p.Cache.Len())
 				_ = p.Cache.Save()
@@ -106,6 +113,7 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 				p.Bridge.Handle(bridge.Network, pm, m.at)
 			}
 			if up != nil {
+				share.FromWIRESX(m.text, m.at)
 				match.Request(m.text, m.at)
 				if _, err := up.Write(hri.Wrap(m.text)); err != nil {
 					p.logf("proxy: writing to HRI-200: %v", err)
@@ -124,22 +132,26 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 			if req, ok := match.Reply(m.text, m.at); ok {
 				p.Cache.Learn(req, m.text)
 			}
-			outs <- Out{m.text, m.at}
-
-		case y := <-ysfIn:
-			if up != nil {
-				if !droppedYSF {
-					p.logf("proxy: HRI-200 attached; YSF from clients is not played to WIRES-X")
-					droppedYSF = true
-				}
+			if share == nil { // read just before the HRI-200 went away
+				outs <- Out{m.text, m.at}
 				continue
 			}
-			droppedYSF = false
-			send(emu.Inject(y.Frame, y.Source, y.End, time.Now()))
+			for _, o := range share.FromRadio(m.text, m.at) {
+				outs <- o
+			}
+
+		case y := <-ysfIn:
+			if share != nil {
+				send(share.FromClient(y, time.Now()))
+			} else {
+				send(emu.Inject(y.Frame, y.Source, y.End, time.Now()))
+			}
 
 		case now := <-tick.C:
 			p.Bridge.Tick(now)
-			if up == nil {
+			if share != nil {
+				send(share.Tick(now))
+			} else {
 				send(emu.Tick(now))
 			}
 			if now.Sub(lastSave) > 10*time.Second {
