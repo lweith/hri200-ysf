@@ -65,7 +65,8 @@ func TestSharerInjectsWhileIdle(t *testing.T) {
 	if got := texts(s.FromRadio("R0303030", ms(400))); got[0] != "R0303030" {
 		t.Errorf("other reply = %q", got)
 	}
-	end := texts(s.Tick(ms(1000)))
+	tick, _ := s.Tick(ms(1000))
+	end := texts(tick)
 	if len(end) == 0 || end[len(end)-1] != idleP || s.Injecting() {
 		t.Errorf("stopped frames ended with %q", end)
 	}

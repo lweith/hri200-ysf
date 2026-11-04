@@ -116,6 +116,47 @@ func ParseData(m Message) (Data, bool) {
 	return d, true
 }
 
+// CommandPayload is the D1G payload of a WIRES-X command the radio received
+// off the air: "210010" and the command's first byte as hex, the three
+// callsign blocks, and the command's bytes as hex. (As captured: "2100107F"
+// for a node info request starting 7F, "21001000" for a room list starting 00.)
+func CommandPayload(csd1, csd2, csd3 [20]byte, data []byte) string {
+	var first byte
+	if len(data) > 0 {
+		first = data[0]
+	}
+	return fmt.Sprintf("210010%02X", first) + string(csd1[:]) + string(csd2[:]) + string(csd3[:]) +
+		strings.ToUpper(hex.EncodeToString(data))
+}
+
+// Command is a D1G or D1F carrying WIRES-X data: an eight-character prefix,
+// the three callsign blocks, and the data as hex, of any length.
+type Command struct {
+	Prefix           string
+	CSD1, CSD2, CSD3 [20]byte
+	Data             []byte
+}
+
+// ParseCommand parses a D1G or D1F carrying WIRES-X data, such as WIRES-X's
+// reply to a command ("20211000", node callsign blocks, the reply).
+func ParseCommand(m Message) (Command, bool) {
+	var c Command
+	p := m.Payload
+	if (m.Cmd != 'G' && m.Cmd != 'F') || len(p) < 70 || (len(p)-68)%2 != 0 {
+		return c, false
+	}
+	data, err := hex.DecodeString(p[68:])
+	if err != nil {
+		return c, false
+	}
+	c.Prefix = p[:8]
+	copy(c.CSD1[:], p[8:28])
+	copy(c.CSD2[:], p[28:48])
+	copy(c.CSD3[:], p[48:68])
+	c.Data = data
+	return c, true
+}
+
 // Key is what pairs a request from WIRES-X with the HRI-200's reply: "D1" and
 // the command letter for D1 messages, otherwise the first character.
 func Key(text string) string {

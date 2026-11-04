@@ -113,7 +113,10 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 				p.Bridge.Handle(bridge.Network, pm, m.at)
 			}
 			if up != nil {
-				share.FromWIRESX(m.text, m.at)
+				if pass, answer := share.FromWIRESX(m.text, m.at); !pass {
+					send(answer)
+					continue
+				}
 				match.Request(m.text, m.at)
 				if _, err := up.Write(hri.Wrap(m.text)); err != nil {
 					p.logf("proxy: writing to HRI-200: %v", err)
@@ -150,7 +153,13 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 		case now := <-tick.C:
 			p.Bridge.Tick(now)
 			if share != nil {
-				send(share.Tick(now))
+				out, packets := share.Tick(now)
+				send(out)
+				for _, pk := range packets {
+					if p.Bridge.Out != nil {
+						p.Bridge.Out(pk)
+					}
+				}
 			} else {
 				send(emu.Tick(now))
 			}

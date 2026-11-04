@@ -3,6 +3,7 @@ package proxy
 import (
 	"time"
 
+	"github.com/lweith/hri200-ysf/internal/bridge"
 	"github.com/lweith/hri200-ysf/internal/hri"
 	"github.com/lweith/hri200-ysf/internal/ysf"
 )
@@ -28,6 +29,8 @@ type Sharer struct {
 	header   []byte    // the current client over's header frame, if seen
 	waiting  bool      // the current client over is waiting for the channel
 	lastYSF  time.Time
+
+	wx wxState // WIRES-X commands from clients: see share_wiresx.go
 }
 
 func (s *Sharer) logf(format string, args ...any) {
@@ -43,15 +46,22 @@ func (s *Sharer) busy(now time.Time) bool {
 	if s.radio != "" && !s.radio.Idle() {
 		return true
 	}
+	if s.wx.replying() {
+		return true
+	}
 	return now.Sub(s.wiresxAt) < wiresxHold && !s.txSeen
 }
 
-// FromWIRESX notes a message from WIRES-X on its way to the HRI-200.
-func (s *Sharer) FromWIRESX(text string, now time.Time) {
+// FromWIRESX notes a message from WIRES-X on its way to the HRI-200. It
+// reports whether to pass it on, and what to answer WIRES-X instead if not.
+func (s *Sharer) FromWIRESX(text string, now time.Time) (bool, []Out) {
+	if out, taken := s.wiresxReply(text, now); taken {
+		return false, out
+	}
 	switch hri.Key(text) {
 	case "D1E", "D1F":
 		if hri.IsAck(text) {
-			return
+			return true, nil
 		}
 		s.wiresxAt = now
 		s.txSeen = false
@@ -63,6 +73,7 @@ func (s *Sharer) FromWIRESX(text string, now time.Time) {
 			s.waiting = true
 		}
 	}
+	return true, nil
 }
 
 // FromRadio passes on a message from the HRI-200, rewritten or held back while
@@ -75,6 +86,9 @@ func (s *Sharer) FromRadio(text string, now time.Time) []Out {
 				s.txSeen = true
 			}
 		}
+	}
+	if s.wx.replying() {
+		return s.fromRadioReplying(text, now)
 	}
 	if s.emu.rx == nil {
 		return []Out{{text, now}}
@@ -98,10 +112,12 @@ func (s *Sharer) FromRadio(text string, now time.Time) []Out {
 // FromClient plays a client's frame to WIRES-X if the channel is free.
 func (s *Sharer) FromClient(y YSF, now time.Time) []Out {
 	s.lastYSF = now
-	if s.emu.rx == nil {
-		if f, err := ysf.DecodeFICH(y.Frame); err == nil && f.FI == ysf.FIHeader {
-			s.header = y.Frame
-		}
+	f, err := ysf.DecodeFICH(y.Frame)
+	if err == nil && f.DT == ysf.DTDataFRMode {
+		return s.commandFrame(y, now)
+	}
+	if s.emu.rx == nil && err == nil && f.FI == ysf.FIHeader {
+		s.header = y.Frame
 	}
 	defer func() {
 		if y.End {
@@ -126,13 +142,16 @@ func (s *Sharer) FromClient(y YSF, now time.Time) []Out {
 	return append(out, s.emu.Inject(y.Frame, y.Source, y.End, now)...)
 }
 
-// Tick ends an injected over whose frames have stopped, and forgets a waiting
-// over that stopped without an end.
-func (s *Sharer) Tick(now time.Time) []Out {
+// Tick ends an injected over whose frames have stopped, forgets a waiting
+// over that stopped without an end, and moves WIRES-X commands and replies
+// along. It returns messages for WIRES-X and frames for the clients.
+func (s *Sharer) Tick(now time.Time) ([]Out, []bridge.Packet) {
 	if s.emu.rx == nil && now.Sub(s.lastYSF) > rxHang {
 		s.header, s.waiting = nil, false
 	}
-	return s.emu.Tick(now)
+	out := s.emu.Tick(now)
+	wxOut, packets := s.wiresxTick(now)
+	return append(out, wxOut...), packets
 }
 
 // End ends an injected over, for when the HRI-200 goes away.
