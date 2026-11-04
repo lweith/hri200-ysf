@@ -44,8 +44,9 @@ const (
 	// transmits from a small buffer and stops for good if it runs dry (seen
 	// 1.1 s into an over fed frame by frame as it arrived). WIRES-X feeds it
 	// from a backlog, each frame as the last is acked, so the buffer fills
-	// and the radio paces the acks at the air rate.
-	prebuffer = 5
+	// and the radio paces the acks at the air rate. Each frame held adds
+	// 100 ms to the delay before the repeater is heard.
+	prebuffer = 3
 	// headerAgain repeats the header after this many voice frames, as WIRES-X
 	// does for an over to everyone (captured: one header, six frames,
 	// the header again, then voice alone for 16 s). It sends data D1Fs only
