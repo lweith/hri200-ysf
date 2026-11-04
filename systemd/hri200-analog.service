@@ -1,0 +1,43 @@
+[Unit]
+Description=Recorder of the analog transmissions the HRI-200's radio receives (read-only USB sniffer)
+Documentation=https://github.com/lweith/hri200-ysf
+After=systemd-modules-load.service
+
+[Service]
+# Root only to open /dev/usbmonN, which is mode 0600; nothing is written to the
+# HRI-200, and the sandbox below allows reading usbmon and sysfs, no more.
+ExecStart=/usr/local/bin/hri200-analog -dir /var/lib/hri200-analog -keep 7
+Restart=always
+# The devices' numbers change if they re-enumerate; a restart finds them again.
+RestartSec=10
+# A week of recordings, 8 kHz 16-bit: about 58 MB per hour of transmissions.
+# World-readable, so anyone on the host can listen to them; UMask=0077 makes
+# them root's alone.
+StateDirectory=hri200-analog
+StateDirectoryMode=0755
+UMask=0022
+
+DevicePolicy=closed
+DeviceAllow=char-usbmon r
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

@@ -35,6 +35,50 @@ type Event struct {
 	Bus      uint16
 	Status   int32
 	Data     []byte
+	Iso      []IsoPacket // isochronous events: where each packet is in Data
+}
+
+// IsoPacket locates one packet of an isochronous transfer in Event.Data.
+type IsoPacket struct {
+	Status int32
+	Offset uint32
+	Length uint32
+}
+
+// IsoData joins the packets an isochronous IN completion carried, skipping
+// any that failed. Anything else returns nil.
+func (e Event) IsoData() []byte {
+	if e.XferType != Isochronous || e.Endpoint&0x80 == 0 || e.Type != 'C' {
+		return nil
+	}
+	var out []byte
+	for _, p := range e.Iso {
+		end := uint64(p.Offset) + uint64(p.Length)
+		if p.Status != 0 || end > uint64(len(e.Data)) {
+			continue
+		}
+		out = append(out, e.Data[p.Offset:end]...)
+	}
+	return out
+}
+
+// splitIso parses ndesc isochronous descriptors from the front of data and
+// sets e.Iso and e.Data (what follows them).
+func (e *Event) splitIso(data []byte, ndesc int) {
+	if ndesc < 0 || ndesc*16 > len(data) {
+		e.Data = nil
+		return
+	}
+	e.Iso = make([]IsoPacket, ndesc)
+	for i := range e.Iso {
+		d := data[16*i:]
+		e.Iso[i] = IsoPacket{
+			Status: int32(binary.LittleEndian.Uint32(d)),
+			Offset: binary.LittleEndian.Uint32(d[4:]),
+			Length: binary.LittleEndian.Uint32(d[8:]),
+		}
+	}
+	e.Data = data[ndesc*16:]
 }
 
 // headerLength is the binary API's original event header, which read() returns.
@@ -89,6 +133,36 @@ func FindBus(vendor, product string) (int, error) {
 	return 0, fmt.Errorf("no USB device %s:%s", vendor, product)
 }
 
+// Device is a USB device's address.
+type Device struct {
+	Bus, Number int
+}
+
+// FindDevices returns the addresses of every device with this vendor and
+// product ID, from sysfs.
+func FindDevices(vendor, product string) []Device {
+	var out []Device
+	dirs, _ := filepath.Glob("/sys/bus/usb/devices/*")
+	for _, d := range dirs {
+		v, _ := os.ReadFile(filepath.Join(d, "idVendor"))
+		p, _ := os.ReadFile(filepath.Join(d, "idProduct"))
+		if strings.TrimSpace(string(v)) != vendor || strings.TrimSpace(string(p)) != product {
+			continue
+		}
+		var dev Device
+		b, _ := os.ReadFile(filepath.Join(d, "busnum"))
+		n, _ := os.ReadFile(filepath.Join(d, "devnum"))
+		if _, err := fmt.Sscan(string(b), &dev.Bus); err != nil {
+			continue
+		}
+		if _, err := fmt.Sscan(string(n), &dev.Number); err != nil {
+			continue
+		}
+		out = append(out, dev)
+	}
+	return out
+}
+
 const (
 	ioctlRingSize = 0x9204     // MON_IOCT_RING_SIZE
 	ioctlStats    = 0x80089203 // MON_IOCG_STATS
@@ -121,7 +195,14 @@ func (l *Live) Next() (Event, error) {
 		return Event{}, fmt.Errorf("short usbmon read: %d bytes", n)
 	}
 	e := parseHeader(l.buf[:headerLength])
-	e.Data = append([]byte(nil), l.buf[headerLength:n]...)
+	data := append([]byte(nil), l.buf[headerLength:n]...)
+	if e.XferType == Isochronous {
+		// The original header's last field is the descriptor count, and
+		// the descriptors come first in the data, as in the mmap API.
+		e.splitIso(data, int(int32(binary.LittleEndian.Uint32(l.buf[44:]))))
+	} else {
+		e.Data = data
+	}
 	return e, nil
 }
 
@@ -183,13 +264,10 @@ func (p *Pcap) Next() (Event, error) {
 		return Event{}, fmt.Errorf("short usbmon record: %d bytes", n)
 	}
 	e := parseHeader(data[:headerLength])
-	ndesc := binary.LittleEndian.Uint32(data[60:])
-	start := 64
 	if e.XferType == Isochronous {
-		start += int(ndesc) * 16
-	}
-	if start <= len(data) {
-		e.Data = data[start:]
+		e.splitIso(data[64:], int(int32(binary.LittleEndian.Uint32(data[60:]))))
+	} else {
+		e.Data = data[64:]
 	}
 	return e, nil
 }
