@@ -3,6 +3,7 @@ package proxy
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lweith/hri200-ysf/internal/hri"
 )
@@ -81,35 +82,76 @@ func TestAnalogTransmission(t *testing.T) {
 	if len(*sent) != n+1 || (*sent)[n] != pttOn {
 		t.Errorf("a second on: sent %q, want PTT on", (*sent)[n:])
 	}
-	// Released: unkeyed at once, back to Digital after the hang.
+	// Released: unkeyed at once, then left in Analog for the session.
 	n = len(*sent)
 	s.PTT(false, ms(3000))
 	if len(*sent) != n+2 || (*sent)[n] != pttOff {
 		t.Fatalf("on release: sent %q, want PTT off twice", (*sent)[n:])
 	}
-	s.Tick(ms(3000 + 250))
-	if len(*sent) != n+2 {
-		t.Fatalf("switched back during the hang: %q", (*sent)[n+2:])
-	}
+	s.FromRadio(stateP("00000"), ms(3030))
 	s.Tick(ms(3000 + 300))
+	if len(*sent) != n+2 || s.analog.phase != aStay {
+		t.Fatalf("after the hang: sent %q, phase %d; want it left in Analog", (*sent)[n+2:], s.analog.phase)
+	}
+	// WIRES-X's status queries go to the radio, the answers rewritten.
+	if pass, _ := s.FromWIRESX("D1C0000", ms(4000)); !pass {
+		t.Error("in Analog between packets: kept WIRES-X's status query from the radio")
+	}
+	if out := s.FromRadio(hri.D1('C', hri.StatePayload("04000")), ms(4010)); len(out) != 1 ||
+		!strings.Contains(out[0].Text, "04000") {
+		t.Errorf("the radio's status answer for WIRES-X: %q", texts(out))
+	}
+	// Back to Digital once packet has been quiet a while (PTT at 1000).
+	quiet := 1000 + int(packetQuiet/time.Millisecond)
+	s.Tick(ms(quiet - 100))
+	if (*sent)[len(*sent)-1] == wxSetDigital {
+		t.Fatal("switched back before packet went quiet")
+	}
+	s.Tick(ms(quiet + 50))
 	if (*sent)[len(*sent)-1] != wxSetDigital {
-		t.Fatalf("after the hang: sent %q, want the switch to Digital", (*sent)[n+2:])
+		t.Fatalf("packet quiet: sent %q, want the switch to Digital", (*sent)[n+2:])
 	}
 	if !s.AnalogDirty() {
 		t.Error("not dirty before the radio confirmed Digital")
 	}
-	s.FromRadio(echoDigital, ms(3374))
-	s.FromRadio(stateP("20000"), ms(3379))
-	s.FromRadio(stateP("00000"), ms(3414))
+	s.FromRadio(echoDigital, ms(quiet+124))
+	s.FromRadio(stateP("20000"), ms(quiet+129))
+	s.FromRadio(stateP("00000"), ms(quiet+164))
 	if s.AnalogDirty() {
 		t.Error("still dirty once the radio confirmed Digital")
 	}
-	s.Tick(ms(3374 + 200))
+	s.Tick(ms(quiet + 400))
 	if s.Analog() {
 		t.Fatal("still holding the radio after settling")
 	}
-	if out := s.FromRadio(idleP, ms(4000)); len(out) != 1 {
+	if out := s.FromRadio(idleP, ms(quiet+1000)); len(out) != 1 {
 		t.Errorf("after: kept the radio's state from WIRES-X")
+	}
+}
+
+// A second packet in the session keys at once: no switch.
+func TestAnalogStaysForTheSession(t *testing.T) {
+	s, sent := analogSharer()
+	s.PTT(true, ms(0))
+	s.FromRadio(echoAnalog, ms(76))
+	s.FromRadio(stateP("00000"), ms(116))
+	s.PTT(false, ms(1000))
+	s.Tick(ms(1400))
+	s.FromRadio(hri.D1('C', hri.StatePayload("04000")), ms(2000))
+	n := len(*sent)
+	s.PTT(true, ms(5000))
+	if len(*sent) != n+2 || (*sent)[n] != pttOn {
+		t.Fatalf("second packet: sent %q, want PTT on twice and no switch", (*sent)[n:])
+	}
+	// The repeater's hang after a received packet still holds it off.
+	s.PTT(false, ms(6000))
+	s.Tick(ms(6400))
+	s.FromRadio(stateP("0A017"), ms(7000))
+	s.FromRadio(stateP("04007"), ms(7500))
+	n = len(*sent)
+	s.PTT(true, ms(7600))
+	if len(*sent) != n {
+		t.Fatalf("in the repeater's hang: sent %q", (*sent)[n:])
 	}
 }
 
@@ -126,15 +168,32 @@ func TestAnalogHoldsWIRESXTransmission(t *testing.T) {
 		t.Fatal("passed WIRES-X's settings write mid-transmission")
 	}
 	s.PTT(false, ms(1000))
-	s.Tick(ms(1300))
-	s.FromRadio(echoDigital, ms(1370))
+	s.FromRadio(stateP("00000"), ms(1030))
 	n := len(*sent)
-	s.Tick(ms(1600))
-	if len(*sent) != n+2 || (*sent)[n] != header || (*sent)[n+1] != wxSetDigital {
-		t.Errorf("once back in Digital: sent %q, want WIRES-X's held messages", (*sent)[n:])
+	// Left in Analog: the held transmission goes to the sock (the emulator
+	// acks it), the settings write waits for Digital.
+	out, _ := s.Tick(ms(1300))
+	acked := false
+	for _, o := range out {
+		acked = acked || o.Text == hri.Ack('F')
+	}
+	if !acked || !s.sock.muted {
+		t.Errorf("WIRES-X's held header: answered %q, muted %v; want the sock's ack", texts(out), s.sock.muted)
+	}
+	if len(*sent) != n {
+		t.Errorf("in Analog: sent %q", (*sent)[n:])
+	}
+	s.FromRadio(hri.D1('C', hri.StatePayload("04000")), ms(2000))
+	quiet := int(packetQuiet / time.Millisecond)
+	s.Tick(ms(quiet + 50)) // our switch back
+	s.FromRadio(echoDigital, ms(quiet+124))
+	n = len(*sent)
+	s.Tick(ms(quiet + 400))
+	if len(*sent) != n+1 || (*sent)[n] != wxSetDigital {
+		t.Errorf("once back in Digital: sent %q, want WIRES-X's held settings write", (*sent)[n:])
 	}
 	// The write's echo is WIRES-X's reply now.
-	if out := s.FromRadio(echoDigital, ms(1680)); len(out) != 1 {
+	if out := s.FromRadio(echoDigital, ms(quiet+480)); len(out) != 1 {
 		t.Errorf("kept the reply to WIRES-X's own write")
 	}
 }
@@ -155,6 +214,37 @@ func TestAnalogRefusedWhenBusy(t *testing.T) {
 	s.PTT(true, ms(800))
 	if len(*sent) != 1 || (*sent)[0] != wxSetAnalog {
 		t.Errorf("next PTT on an idle channel: sent %q", *sent)
+	}
+}
+
+// A packet's answer waits out the repeater's hang after repeating it (captured:
+// 0A010, 0A017, then 04007 for 2 s).
+func TestAnalogWaitsOutRepeaterHang(t *testing.T) {
+	s, sent := analogSharer()
+	for i, st := range []hri.State{"0A010", "0A017"} {
+		s.FromRadio(stateP(st), ms(10*i))
+	}
+	s.PTT(true, ms(100))
+	if len(*sent) != 0 {
+		t.Fatalf("receiving: sent %q", *sent)
+	}
+	s.PTT(false, ms(150))
+	s.FromRadio(stateP("04007"), ms(600))
+	s.PTT(true, ms(800))
+	if len(*sent) != 0 {
+		t.Fatalf("in the hang: sent %q, want nothing (the DR-1X stopped transmitting after this)", *sent)
+	}
+	s.PTT(false, ms(900))
+	s.FromRadio(idleP, ms(2600))
+	s.PTT(true, ms(2700))
+	if len(*sent) != 1 || (*sent)[0] != wxSetAnalog {
+		t.Fatalf("idle after the hang: sent %q, want the switch to Analog", *sent)
+	}
+	// A client's over still waits out the hang.
+	s2, _ := analogSharer()
+	s2.FromRadio(stateP("04007"), ms(0))
+	if !s2.busy(ms(10)) {
+		t.Error("the hang no longer holds clients' overs")
 	}
 }
 
@@ -183,14 +273,11 @@ func TestAnalogStuckPTT(t *testing.T) {
 	for t := 200; t < 16000; t += 50 {
 		s.Tick(ms(t))
 	}
-	found := false
-	for _, text := range *sent {
-		if text == wxSetDigital {
-			found = true
-		}
+	if s.analog.phase == aKeyed {
+		t.Fatal("a PTT held 16 s: still keyed")
 	}
-	if !found {
-		t.Errorf("a PTT held 16 s: never switched back")
+	if last := (*sent)[len(*sent)-1]; last != pttOff {
+		t.Errorf("a PTT held 16 s: last sent %q, want PTT off", last)
 	}
 }
 

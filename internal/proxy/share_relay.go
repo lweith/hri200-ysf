@@ -175,6 +175,9 @@ func (s *Sharer) relayFrom(out []Out, now time.Time) {
 	if s.Radio == nil {
 		return
 	}
+	if s.Analog() {
+		return // in Analog for packet: the over reaches the room, not the repeater
+	}
 	r := &s.relay
 	rx := s.emu.rx
 	if rx != nil && rx != r.rx {

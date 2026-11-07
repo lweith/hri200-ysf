@@ -26,7 +26,37 @@ type Cache struct {
 	mu      sync.Mutex
 	Replies map[string]string `json:"replies"`
 	Updated time.Time         `json:"updated"`
-	dirty   bool
+	// Mode is the radio's WIRES Operation as it last echoed it in a D1M
+	// ("0" Analog, "1" Digital), so that a radio left in Analog by a proxy
+	// that stopped or crashed mid-session is switched back on the next start.
+	Mode  string `json:"mode,omitempty"`
+	dirty bool
+}
+
+// NoteMode records the WIRES Operation from a D1M the radio sent.
+func (c *Cache) NoteMode(text string) {
+	m, ok := hri.Parse(text)
+	if !ok || m.Cmd != 'M' || len(m.Payload) <= 67 {
+		return
+	}
+	mode := m.Payload[67:68]
+	if mode != "0" && mode != "1" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.Mode != mode {
+		c.Mode = mode
+		c.Updated = time.Now().UTC()
+		c.dirty = true
+	}
+}
+
+// LastMode is the WIRES Operation the radio last echoed, "" if never seen.
+func (c *Cache) LastMode() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Mode
 }
 
 // LoadCache reads the cache file; a missing file is an empty cache.
@@ -70,6 +100,9 @@ func (c *Cache) Learn(request, reply string) {
 
 // Reply returns the cached reply to a request.
 func (c *Cache) Reply(request string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	r, ok := c.Replies[request]

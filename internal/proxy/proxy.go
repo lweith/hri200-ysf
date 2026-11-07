@@ -37,6 +37,9 @@ type Proxy struct {
 	// PTT, if set, carries a packet modem's PTT: the HRI-200's radio is
 	// switched to Analog and keyed while it is on (see share_analog.go).
 	PTT <-chan bool
+	// Sessions, if set, counts the AX.25 sessions open on the radio's
+	// channel (see share_sock.go).
+	Sessions func(now time.Time) int
 }
 
 func (p *Proxy) logf(format string, args ...any) {
@@ -94,7 +97,9 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 		if up != nil && share != nil && share.AnalogDirty() {
 			p.logf("proxy: stopping with the repeater in Analog, switching it back")
 			for _, text := range []string{pttOff, pttOff, SetMode(digitalMode)} {
-				_, _ = up.Write(hri.Wrap(text))
+				if _, err := up.Write(hri.Wrap(text)); err != nil {
+					p.logf("proxy: writing to HRI-200: %v", err)
+				}
 			}
 			time.Sleep(300 * time.Millisecond)
 		}
@@ -114,6 +119,8 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 				up = f
 				share = &Sharer{Log: p.Log}
 				share.emu.Log = p.Log
+				share.emu.Cache = p.Cache // answers WIRES-X for the sock
+				share.Sessions = p.Sessions
 				radio := f
 				write := func(text string) {
 					if p.Verbose {
@@ -128,7 +135,7 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 				}
 				if p.PTT != nil {
 					share.Write = write
-					if analogDirty {
+					if analogDirty || p.Cache.LastMode() != "1" {
 						share.ForceDigital(time.Now())
 					}
 				}
@@ -180,6 +187,9 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 				if st, ok := hri.ParseState(pm); ok && p.Usage != nil {
 					p.Usage.State(st, m.at, share != nil && share.Relaying())
 				}
+			}
+			if hri.Key(m.text) == "D1M" {
+				p.Cache.NoteMode(m.text)
 			}
 			if req, ok := match.Reply(m.text, m.at); ok {
 				p.Cache.Learn(req, m.text)
@@ -250,6 +260,9 @@ func (p *Proxy) watchUpstream(ctx context.Context, events chan<- *os.File, msgs 
 		select {
 		case <-done:
 		case <-ctx.Done():
+			// Left open: Run may still write to it as it stops (switching
+			// the radio back to Digital). It closes when the process ends.
+			return
 		}
 		f.Close()
 		events <- nil

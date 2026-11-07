@@ -37,6 +37,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lweith/hri200-ysf/internal/ax25mon"
 	"github.com/lweith/hri200-ysf/internal/bridge"
 	"github.com/lweith/hri200-ysf/internal/cm108"
 	"github.com/lweith/hri200-ysf/internal/hri"
@@ -71,6 +72,7 @@ var (
 	upstream   = flag.String("upstream", "auto", "with -proxy: the HRI-200's tty, or auto to find it by USB ID")
 	allow      = flag.String("allow", "", "with -proxy: comma-separated networks whose YSF audio is played to WIRES-X")
 	transmit   = flag.Bool("transmit", false, "with -proxy: also transmit -allow'ed clients' overs on the HRI-200's radio, so the repeater hears them")
+	agwMon     = flag.String("agw-monitor", "127.0.0.1:8000", "with -ptt: direwolf's AGW port, to follow AX.25 sessions and keep room traffic off the repeater while one is open (\"\" for off)")
 	ptt        = flag.Bool("ptt", false, "with -proxy: present a fake CM108 (uhid) whose GPIO 3 keys the HRI-200's radio in Analog, for direwolf's PTT CM108")
 	metrics    = flag.String("metrics", "", "with -proxy: serve the repeater's usage as Prometheus metrics on this TCP address, at /metrics")
 )
@@ -177,6 +179,11 @@ func runProxy(refl *reflector.Reflector, b *bridge.Bridge, cache *proxy.Cache) {
 			}
 		}()
 		log.Printf("ptt: fake CM108 for direwolf (GPIO %d)", dev.GPIO)
+		if *agwMon != "" {
+			tr := &ax25mon.Tracker{Log: log.Printf}
+			p.Sessions = func(now time.Time) int { return tr.Active(now) }
+			go tr.Run(*agwMon)
+		}
 	}
 	if *metrics != "" {
 		p.Usage = &usage.Tracker{}
