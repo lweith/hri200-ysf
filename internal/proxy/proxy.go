@@ -34,6 +34,9 @@ type Proxy struct {
 	Transmit bool
 	// Usage, if set, times the repeater's overs from the HRI-200's states.
 	Usage *usage.Tracker
+	// PTT, if set, carries a packet modem's PTT: the HRI-200's radio is
+	// switched to Analog and keyed while it is on (see share_analog.go).
+	PTT <-chan bool
 }
 
 func (p *Proxy) logf(format string, args ...any) {
@@ -84,6 +87,18 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 	defer tick.Stop()
 	lastSave := time.Now()
 	defer p.Cache.Save()
+	// The radio may be in Analog: an analog transmission was under way when
+	// the HRI-200 went away. Switched back when it returns.
+	analogDirty := false
+	defer func() {
+		if up != nil && share != nil && share.AnalogDirty() {
+			p.logf("proxy: stopping with the repeater in Analog, switching it back")
+			for _, text := range []string{pttOff, pttOff, SetMode(digitalMode)} {
+				_, _ = up.Write(hri.Wrap(text))
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+	}()
 
 	p.logf("proxy: WIRES-X on %s, %d cached replies", p.Downstream, p.Cache.Len())
 	for {
@@ -99,15 +114,22 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 				up = f
 				share = &Sharer{Log: p.Log}
 				share.emu.Log = p.Log
+				radio := f
+				write := func(text string) {
+					if p.Verbose {
+						p.logf("to radio: %.60s", text)
+					}
+					if _, err := radio.Write(hri.Wrap(text)); err != nil {
+						p.logf("proxy: writing to HRI-200: %v", err)
+					}
+				}
 				if p.Transmit {
-					radio := f
-					share.Radio = func(text string) {
-						if p.Verbose {
-							p.logf("to radio: %.60s", text)
-						}
-						if _, err := radio.Write(hri.Wrap(text)); err != nil {
-							p.logf("proxy: writing to HRI-200: %v", err)
-						}
+					share.Radio = write
+				}
+				if p.PTT != nil {
+					share.Write = write
+					if analogDirty {
+						share.ForceDigital(time.Now())
 					}
 				}
 				if p.Usage != nil {
@@ -120,6 +142,7 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 					p.Usage.Detached(time.Now())
 				}
 				if share != nil {
+					analogDirty = share.AnalogDirty()
 					send(share.End(time.Now()))
 					share = nil
 				}
@@ -167,6 +190,13 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 			}
 			for _, o := range share.FromRadio(m.text, m.at) {
 				outs <- o
+			}
+
+		case on := <-p.PTT:
+			if share != nil {
+				send(share.PTT(on, time.Now()))
+			} else if on {
+				p.logf("proxy: PTT, but the HRI-200 is away")
 			}
 
 		case y := <-ysfIn:

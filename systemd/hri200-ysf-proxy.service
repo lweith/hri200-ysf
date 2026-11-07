@@ -2,7 +2,7 @@
 Description=HRI-200 caching proxy and YSF gateway
 Documentation=https://github.com/lweith/hri200-ysf
 Requires=hri200-gadget.service
-After=hri200-gadget.service network-online.target
+After=hri200-gadget.service network-online.target systemd-modules-load.service
 Wants=network-online.target
 # Both serve YSF on the same port.
 Conflicts=hri200-ysf.service
@@ -20,6 +20,8 @@ StateDirectoryMode=0700
 DevicePolicy=closed
 DeviceAllow=char-ttyGS rw
 DeviceAllow=char-ttyACM rw
+# -ptt: the fake CM108 for direwolf.
+DeviceAllow=/dev/uhid rw
 CapabilityBoundingSet=
 NoNewPrivileges=yes
 ProtectSystem=strict

@@ -1,0 +1,39 @@
+[Unit]
+Description=direwolf on the HRI-200's radio (codec audio, PTT through hri200-ysf -ptt)
+After=network.target sound.target hri200-ysf-proxy.service
+
+[Service]
+ExecStart=/usr/bin/direwolf -t 0 -c /etc/direwolf-hri200.conf
+Restart=on-failure
+RestartSec=10
+DynamicUser=yes
+StateDirectory=direwolf-hri200
+# KISS 8001 / AGW 8000 bind to all interfaces; only localhost may use them.
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# The codec (ALSA card "codec"); /dev/snd is root:audio 0660.
+SupplementaryGroups=audio
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+# PTT: /dev/hri200-ptt, root:audio 0660 (70-hri200-ptt.rules).
+DeviceAllow=char-hidraw rw
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

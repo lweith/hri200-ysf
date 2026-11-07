@@ -24,6 +24,9 @@ type Sharer struct {
 	// Radio, if set, writes a message to the HRI-200, and clients' overs are
 	// transmitted on the repeater too: see share_relay.go.
 	Radio func(text string)
+	// Write, if set, writes a message to the HRI-200 for an analog
+	// transmission keyed by PTT: see share_analog.go.
+	Write func(text string)
 
 	emu      Emulator
 	radio    hri.State // as the HRI-200 last reported it
@@ -33,8 +36,9 @@ type Sharer struct {
 	waiting  bool      // the current client over is waiting for the channel
 	lastYSF  time.Time
 
-	wx    wxState    // WIRES-X commands from clients: see share_wiresx.go
-	relay relayState // clients' overs on the repeater: see share_relay.go
+	wx     wxState     // WIRES-X commands from clients: see share_wiresx.go
+	relay  relayState  // clients' overs on the repeater: see share_relay.go
+	analog analogState // packet modem's transmissions: see share_analog.go
 }
 
 func (s *Sharer) logf(format string, args ...any) {
@@ -51,6 +55,9 @@ func (s *Sharer) Relaying() bool { return s.relay.on }
 func (s *Sharer) Injecting() bool { return s.emu.rx != nil }
 
 func (s *Sharer) busy(now time.Time) bool {
+	if s.Analog() {
+		return true
+	}
 	if s.radio != "" && !s.radio.Idle() {
 		return true
 	}
@@ -63,6 +70,9 @@ func (s *Sharer) busy(now time.Time) bool {
 // FromWIRESX notes a message from WIRES-X on its way to the HRI-200. It
 // reports whether to pass it on, and what to answer WIRES-X instead if not.
 func (s *Sharer) FromWIRESX(text string, now time.Time) (bool, []Out) {
+	if taken, out := s.analogFromWIRESX(text, now); taken {
+		return false, out
+	}
 	if out, taken := s.wiresxReply(text, now); taken {
 		return false, out
 	}
@@ -92,6 +102,9 @@ func (s *Sharer) FromWIRESX(text string, now time.Time) (bool, []Out) {
 // FromRadio passes on a message from the HRI-200, rewritten or held back while
 // a client's over is being played so WIRES-X sees one consistent radio.
 func (s *Sharer) FromRadio(text string, now time.Time) []Out {
+	if out, taken := s.analogFromRadio(text, now); taken {
+		return out
+	}
 	if out, taken := s.relayFromRadio(text, now); taken {
 		return out
 	}
@@ -174,6 +187,7 @@ func (s *Sharer) Tick(now time.Time) ([]Out, []bridge.Packet) {
 	out := s.emu.Tick(now)
 	s.relaySync()
 	s.relayTick(now)
+	out = append(out, s.analogTick(now)...)
 	wxOut, packets := s.wiresxTick(now)
 	return append(out, wxOut...), packets
 }

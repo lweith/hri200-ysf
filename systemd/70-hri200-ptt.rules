@@ -1,0 +1,4 @@
+# Installed as /etc/udev/rules.d/70-hri200-ptt.rules.
+# hri200-ysf -ptt's fake CM108 (uhid, virtual bus 0006, C-Media 0d8c:000c):
+# a stable name for direwolf's "PTT CM108", writable by the audio group.
+SUBSYSTEM=="hidraw", KERNELS=="0006:0D8C:000C.*", SYMLINK+="hri200-ptt", GROUP="audio", MODE="0660"

@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/lweith/hri200-ysf/internal/bridge"
+	"github.com/lweith/hri200-ysf/internal/cm108"
 	"github.com/lweith/hri200-ysf/internal/hri"
 	"github.com/lweith/hri200-ysf/internal/proxy"
 	"github.com/lweith/hri200-ysf/internal/reflector"
@@ -70,6 +71,7 @@ var (
 	upstream   = flag.String("upstream", "auto", "with -proxy: the HRI-200's tty, or auto to find it by USB ID")
 	allow      = flag.String("allow", "", "with -proxy: comma-separated networks whose YSF audio is played to WIRES-X")
 	transmit   = flag.Bool("transmit", false, "with -proxy: also transmit -allow'ed clients' overs on the HRI-200's radio, so the repeater hears them")
+	ptt        = flag.Bool("ptt", false, "with -proxy: present a fake CM108 (uhid) whose GPIO 3 keys the HRI-200's radio in Analog, for direwolf's PTT CM108")
 	metrics    = flag.String("metrics", "", "with -proxy: serve the repeater's usage as Prometheus metrics on this TCP address, at /metrics")
 )
 
@@ -160,6 +162,21 @@ func runProxy(refl *reflector.Reflector, b *bridge.Bridge, cache *proxy.Cache) {
 		Log:        log.Printf,
 		Verbose:    *verbose,
 		Transmit:   *transmit,
+	}
+	if *ptt {
+		dev, err := cm108.Open("HRI-200 PTT (hri200-ysf)")
+		if err != nil {
+			log.Fatalf("-ptt: %v", err)
+		}
+		defer dev.Close()
+		ch := make(chan bool, 16)
+		p.PTT = ch
+		go func() {
+			if err := dev.Run(ch, log.Printf); err != nil {
+				log.Fatalf("-ptt: %v", err)
+			}
+		}()
+		log.Printf("ptt: fake CM108 for direwolf (GPIO %d)", dev.GPIO)
 	}
 	if *metrics != "" {
 		p.Usage = &usage.Tracker{}
