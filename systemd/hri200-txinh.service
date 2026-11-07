@@ -1,0 +1,12 @@
+[Unit]
+Description=Simulated GPIO line for direwolf-hri200's TXINH (driven by hri200-ysf -txinh)
+Before=direwolf-hri200.service hri200-ysf-proxy.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/hri200-txinh-setup start
+ExecStop=/usr/local/sbin/hri200-txinh-setup stop
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,87 @@
+#!/bin/bash
+# hri200-txinh-setup: a simulated GPIO line (gpio-sim) for direwolf's TXINH.
+#
+# hri200-ysf -txinh drives the line's input from the repeater's state: high
+# while the channel is busy (receiving, its hang, its CW ID, WIRES-X), so
+# direwolf holds its frames instead of keying into a PTT the proxy refuses.
+# direwolf reads the line through sysfs (TXINH GPIO n).
+#
+#	hri200-txinh-setup start   create, export, inhibit; write /run/hri200-txinh/
+#	hri200-txinh-setup conf    rewrite /run/hri200-txinh/direwolf.conf only
+#	hri200-txinh-setup stop    remove
+#
+# /run/hri200-txinh/pull    the line's simulated input ("pull-up" inhibits)
+# /run/hri200-txinh/gpio    its sysfs GPIO number
+# /run/hri200-txinh/direwolf.conf   /etc/direwolf-hri200.conf with that number
+#                           in its TXINH line
+set -euo pipefail
+
+name=hri200-txinh
+cfs=/sys/kernel/config/gpio-sim/$name
+run=/run/hri200-txinh
+conf=/etc/direwolf-hri200.conf
+
+stop() {
+	if [ -e "$run/gpio" ] && [ -e "/sys/class/gpio/gpio$(cat "$run/gpio")" ]; then
+		cat "$run/gpio" > /sys/class/gpio/unexport || true
+	fi
+	if [ -d "$cfs" ]; then
+		echo 0 > "$cfs/live"
+		rmdir "$cfs/bank0/line0" 2>/dev/null || true
+		rmdir "$cfs/bank0" "$cfs"
+	fi
+	rm -rf "$run"
+}
+
+start() {
+	modprobe gpio-sim
+	mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+	[ -d "$cfs" ] && stop
+	mkdir "$cfs" "$cfs/bank0"
+	echo 1 > "$cfs/bank0/num_lines"
+	echo "$name" > "$cfs/bank0/label"
+	echo 1 > "$cfs/live"
+
+	dev=$(cat "$cfs/dev_name")
+	chip=$(cat "$cfs/bank0/chip_name")
+	pull=/sys/devices/platform/$dev/$chip/sim_gpio0/pull
+	echo pull-up > "$pull" # inhibit until the proxy says otherwise
+
+	# The sysfs number: the base of the gpiochip labelled $name.
+	base=
+	for c in /sys/class/gpio/gpiochip*; do
+		if [ "$(cat "$c/label")" = "$name" ]; then
+			base=$(cat "$c/base")
+		fi
+	done
+	[ -n "$base" ] || { echo "$name: no sysfs gpiochip labelled $name" >&2; exit 1; }
+	[ -e "/sys/class/gpio/gpio$base" ] || echo "$base" > /sys/class/gpio/export
+	g=/sys/class/gpio/gpio$base
+	echo in > "$g/direction"
+	# direwolf (group audio) rewrites the direction at start and reads value.
+	chgrp audio "$g/direction" "$g/value"
+	chmod g+rw "$g/direction" "$g/value"
+
+	mkdir -p "$run"
+	ln -sfn "$pull" "$run/pull"
+	echo "$base" > "$run/gpio"
+	echo "$name: gpio $base ($dev $chip), inhibiting"
+	conf
+}
+
+# conf: direwolf's config with the line's number (direwolf-hri200.service's
+# ExecStartPre, so that edits to $conf need only a restart).
+conf() {
+	base=$(cat "$run/gpio")
+	grep -q '^TXINH GPIO ' "$conf" || { echo "$name: no TXINH GPIO line in $conf" >&2; exit 1; }
+	sed -E "s/^TXINH GPIO .*/TXINH GPIO $base/" "$conf" > "$run/direwolf.conf.new"
+	chmod 0644 "$run/direwolf.conf.new"
+	mv "$run/direwolf.conf.new" "$run/direwolf.conf"
+}
+
+case "${1:-}" in
+start) start ;;
+stop) stop ;;
+conf) conf ;;
+*) echo "usage: $0 start|stop|conf" >&2; exit 2 ;;
+esac

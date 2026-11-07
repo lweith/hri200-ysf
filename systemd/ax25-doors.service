@@ -1,10 +1,16 @@
 [Unit]
-Description=Hunt the Wumpus over AX.25 (ax25-door on direwolf-hri200's AGW port)
+Description=Game doors over AX.25: wumpus KN6FLN-11, trek KN6FLN-12 (ax25-door on direwolf-hri200's AGW port)
 After=direwolf-hri200.service
 Wants=direwolf-hri200.service
 
 [Service]
-ExecStart=/usr/local/bin/ax25-door -agw 127.0.0.1:8000 -call KN6FLN-11 -banner "W8HHF/R wumpus door. Answer n to skip the instructions (2 kB, about 20 s on the air). ^D or Q to leave." /usr/games/wump
+# One process for all doors: direwolf 1.7 takes only three AGW clients, and
+# the proxy's session tracker and airtime are two of them.
+ExecStart=/usr/local/bin/ax25-door -agw 127.0.0.1:8000 \
+	-door "KN6FLN-11 /usr/games/wump" \
+	-banner "KN6FLN-11 W8HHF/R wumpus door. Answer n to skip the instructions (2 kB, about 20 s on the air). ^D or Q to leave." \
+	-door "KN6FLN-12 /usr/games/trek" \
+	-banner "KN6FLN-12 W8HHF/R trek door. Send return, then short, novice and any password. ? lists commands (srscan, lrscan, move, phasers, torpedo, dock...); terminate or ^D to leave."
 Restart=always
 RestartSec=10
 DynamicUser=yes

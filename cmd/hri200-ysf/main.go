@@ -54,27 +54,32 @@ type source interface {
 }
 
 var (
-	device     = flag.String("usbmon", "auto", "usbmon device, or auto to find the HRI-200's bus")
-	pcap       = flag.String("pcap", "", "replay this usbmon capture instead of sniffing live")
-	listen     = flag.String("listen", ":42000", "UDP address to serve YSF clients on")
-	gateway    = flag.String("gateway", "HRI200", "callsign in the packets' gateway field")
-	id         = flag.Int("id", 99999, "reflector ID, in status replies")
-	name       = flag.String("name", "HRI200", "reflector name, in status replies")
-	desc       = flag.String("description", "HRI-200 sniff", "reflector description, in status replies")
-	dump       = flag.String("dump", "", "also write every frame as hex to this file")
-	fast       = flag.Bool("fast", false, "replay as fast as possible, keeping the captured timing (for -dump)")
-	oversDir   = flag.String("overs", "", "keep every transmission's frames under this directory, a subdirectory per day")
-	keep       = flag.Int("keep", 7, "with -overs: days of transmissions to keep")
-	verbose    = flag.Bool("v", false, "log every HRI-200 message")
-	cachePath  = flag.String("cache", "", "file to keep the HRI-200's replies in (learned in both modes)")
-	proxyMode  = flag.Bool("proxy", false, "proxy between WIRES-X (-downstream) and the HRI-200, instead of sniffing")
-	downstream = flag.String("downstream", "/dev/ttyGS0", "with -proxy: the tty WIRES-X talks to (the USB gadget)")
-	upstream   = flag.String("upstream", "auto", "with -proxy: the HRI-200's tty, or auto to find it by USB ID")
-	allow      = flag.String("allow", "", "with -proxy: comma-separated networks whose YSF audio is played to WIRES-X")
-	transmit   = flag.Bool("transmit", false, "with -proxy: also transmit -allow'ed clients' overs on the HRI-200's radio, so the repeater hears them")
-	agwMon     = flag.String("agw-monitor", "127.0.0.1:8000", "with -ptt: direwolf's AGW port, to follow AX.25 sessions and keep room traffic off the repeater while one is open (\"\" for off)")
-	ptt        = flag.Bool("ptt", false, "with -proxy: present a fake CM108 (uhid) whose GPIO 3 keys the HRI-200's radio in Analog, for direwolf's PTT CM108")
-	metrics    = flag.String("metrics", "", "with -proxy: serve the repeater's usage as Prometheus metrics on this TCP address, at /metrics")
+	device      = flag.String("usbmon", "auto", "usbmon device, or auto to find the HRI-200's bus")
+	pcap        = flag.String("pcap", "", "replay this usbmon capture instead of sniffing live")
+	listen      = flag.String("listen", ":42000", "UDP address to serve YSF clients on")
+	gateway     = flag.String("gateway", "HRI200", "callsign in the packets' gateway field")
+	id          = flag.Int("id", 99999, "reflector ID, in status replies")
+	name        = flag.String("name", "HRI200", "reflector name, in status replies")
+	desc        = flag.String("description", "HRI-200 sniff", "reflector description, in status replies")
+	dump        = flag.String("dump", "", "also write every frame as hex to this file")
+	fast        = flag.Bool("fast", false, "replay as fast as possible, keeping the captured timing (for -dump)")
+	oversDir    = flag.String("overs", "", "keep every transmission's frames under this directory, a subdirectory per day")
+	keep        = flag.Int("keep", 7, "with -overs: days of transmissions to keep")
+	verbose     = flag.Bool("v", false, "log every HRI-200 message")
+	cachePath   = flag.String("cache", "", "file to keep the HRI-200's replies in (learned in both modes)")
+	proxyMode   = flag.Bool("proxy", false, "proxy between WIRES-X (-downstream) and the HRI-200, instead of sniffing")
+	downstream  = flag.String("downstream", "/dev/ttyGS0", "with -proxy: the tty WIRES-X talks to (the USB gadget)")
+	upstream    = flag.String("upstream", "auto", "with -proxy: the HRI-200's tty, or auto to find it by USB ID")
+	allow       = flag.String("allow", "", "with -proxy: comma-separated networks whose YSF audio is played to WIRES-X")
+	transmit    = flag.Bool("transmit", false, "with -proxy: also transmit -allow'ed clients' overs on the HRI-200's radio, so the repeater hears them")
+	agwMon      = flag.String("agw-monitor", "127.0.0.1:8000", "with -ptt: direwolf's AGW port, to follow AX.25 sessions and keep room traffic off the repeater while one is open (\"\" for off)")
+	ptt         = flag.Bool("ptt", false, "with -proxy: present a fake CM108 (uhid) whose GPIO 3 keys the HRI-200's radio in Analog, for direwolf's PTT CM108")
+	txinh       = flag.String("txinh", "", "with -ptt: a gpio-sim line's pull attribute (hri200-txinh-setup's /run/hri200-txinh/pull), held up while the channel is busy, for direwolf's TXINH GPIO")
+	priority    = flag.String("priority", "packet", "with -ptt: which traffic keeps the channel when WIRES-X and packet both want it: packet (WIRES-X's overs wait out a packet session) or wiresx (WIRES-X's overs always reach the radio, and packet waits for WIRES-X to be quiet)")
+	packetQuiet = flag.Duration("packet-quiet", 20*time.Second, "with -ptt: how long the radio stays in Analog after packet activity")
+	wiresxQuiet = flag.Duration("wiresx-quiet", 60*time.Second, "with -ptt: how long WIRES-X must be quiet before packet transmits")
+	hangZero    = flag.Bool("hang-zero", false, "with -ptt: set the repeater's hang time (SQLT) to 0 with each switch to Analog for packet, and back to what it was with the switch to Digital")
+	metrics     = flag.String("metrics", "", "with -proxy: serve the repeater's usage as Prometheus metrics on this TCP address, at /metrics")
 )
 
 func main() {
@@ -183,6 +188,16 @@ func runProxy(refl *reflector.Reflector, b *bridge.Bridge, cache *proxy.Cache) {
 			tr := &ax25mon.Tracker{Log: log.Printf}
 			p.Sessions = func(now time.Time) int { return tr.Active(now) }
 			go tr.Run(*agwMon)
+		}
+		p.HangZero = *hangZero
+		p.Policy = proxy.Policy{Priority: proxy.Priority(*priority), PacketQuiet: *packetQuiet, WIRESXQuiet: *wiresxQuiet}
+		if err := p.Policy.Validate(); err != nil {
+			log.Fatalf("-priority: %v", err)
+		}
+		log.Printf("ptt: priority %s, packet-quiet %v, wiresx-quiet %v", p.Policy.Priority, p.Policy.PacketQuiet, p.Policy.WIRESXQuiet)
+		if *txinh != "" {
+			p.TXInhibit = txInhibitLine(*txinh)
+			log.Printf("ptt: driving direwolf's TXINH through %s", *txinh)
 		}
 	}
 	if *metrics != "" {

@@ -14,6 +14,12 @@ import (
 // transmission after acking its header.
 const wiresxHold = 3 * time.Second
 
+// wiresxQuiet holds packet transmissions until WIRES-X has sent nothing for
+// this long. Digital (C4FM) reception from the air is not interrupted by packet
+// once the packet hold is in place, because packet keys only when WIRES-X is
+// quiet.
+const wiresxQuiet = 60 * time.Second
+
 // Sharer plays YSF from clients to WIRES-X while the HRI-200 is attached, as
 // the emulator does when it is absent, but only while the repeater is neither
 // receiving nor transmitting. The repeater wins: a reception that starts on the
@@ -30,6 +36,13 @@ type Sharer struct {
 	// Sessions, if set, counts the AX.25 sessions open on the channel: room
 	// traffic stays off the repeater while there are any (share_sock.go).
 	Sessions func(now time.Time) int
+	// HangZero takes the repeater's hang time to 0 with each switch to Analog
+	// for packet and puts it back with the switch to Digital (share_analog.go
+	// hangFor): it only holds the channel up between packet transmissions.
+	HangZero bool
+	// Policy sets which traffic keeps the channel when WIRES-X and packet
+	// both want it (policy.go). The zero value is the default policy.
+	Policy Policy
 
 	emu      Emulator
 	radio    hri.State // as the HRI-200 last reported it
@@ -66,6 +79,11 @@ func (s *Sharer) busy(now time.Time) bool {
 		return true
 	}
 	return s.wiresxBusy(now)
+}
+
+// wiresxRecent reports whether WIRES-X sent anything within wiresxQuiet.
+func (s *Sharer) wiresxRecent(now time.Time) bool {
+	return !s.wiresxAt.IsZero() && now.Sub(s.wiresxAt) < s.policy().WIRESXQuiet
 }
 
 // wiresxBusy reports whether WIRES-X has, or may be about to take, the radio.

@@ -40,6 +40,17 @@ type Proxy struct {
 	// Sessions, if set, counts the AX.25 sessions open on the radio's
 	// channel (see share_sock.go).
 	Sessions func(now time.Time) int
+	// TXInhibit, if set, is told whenever the channel turns busy or clear for
+	// the packet modem: busy wherever PTT would be refused (the repeater
+	// receiving, in its hang or CW ID, WIRES-X transmitting, the HRI-200
+	// away), so that the modem holds its frames rather than send them into a
+	// refused PTT (direwolf's TXINH).
+	TXInhibit func(on bool)
+	// HangZero, with PTT: no repeater hang time while in Analog for packet
+	// (Sharer.HangZero).
+	HangZero bool
+	// Policy is the channel's sharing rules (policy.go).
+	Policy Policy
 }
 
 func (p *Proxy) logf(format string, args ...any) {
@@ -96,12 +107,36 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 	defer func() {
 		if up != nil && share != nil && share.AnalogDirty() {
 			p.logf("proxy: stopping with the repeater in Analog, switching it back")
-			for _, text := range []string{pttOff, pttOff, SetMode(digitalMode)} {
+			// The hang time, if owed, goes back too, but stays owed in the
+			// cache until an echo shows it (this process won't see one).
+			for _, text := range []string{pttOff, pttOff, ModeWrite(digitalMode, p.Cache.HangOwed())} {
 				if _, err := up.Write(hri.Wrap(text)); err != nil {
 					p.logf("proxy: writing to HRI-200: %v", err)
 				}
 			}
 			time.Sleep(300 * time.Millisecond)
+		}
+	}()
+
+	// The packet modem's TX inhibit, written only when it changes.
+	inhibited, inhibitKnown := false, false
+	inhibit := func(now time.Time) {
+		if p.TXInhibit == nil {
+			return
+		}
+		on := share == nil || share.TXInhibited(now)
+		if inhibitKnown && on == inhibited {
+			return
+		}
+		inhibited, inhibitKnown = on, true
+		if p.Verbose {
+			p.logf("proxy: TX inhibit %v", on)
+		}
+		p.TXInhibit(on)
+	}
+	defer func() {
+		if p.TXInhibit != nil {
+			p.TXInhibit(true)
 		}
 	}()
 
@@ -135,7 +170,9 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 				}
 				if p.PTT != nil {
 					share.Write = write
-					if analogDirty || p.Cache.LastMode() != "1" {
+					share.HangZero = p.HangZero
+					share.Policy = p.Policy
+					if analogDirty || p.Cache.LastMode() != "1" || p.Cache.HangOwed() != "" {
 						share.ForceDigital(time.Now())
 					}
 				}
@@ -201,6 +238,7 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 			for _, o := range share.FromRadio(m.text, m.at) {
 				outs <- o
 			}
+			inhibit(m.at)
 
 		case on := <-p.PTT:
 			if share != nil {
@@ -229,6 +267,7 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 			} else {
 				send(emu.Tick(now))
 			}
+			inhibit(now)
 			if now.Sub(lastSave) > 10*time.Second {
 				if err := p.Cache.Save(); err != nil {
 					p.logf("proxy: saving cache: %v", err)

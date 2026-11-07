@@ -18,7 +18,9 @@ import (
 // With Sharer.Sessions set (AX.25 sessions followed from direwolf, see
 // ax25mon), it also holds for as long as any connected-mode session is open,
 // however long its stations take between frames.
-const packetQuiet = 60 * time.Second
+// packetQuiet is how long the radio stays in Analog after packet activity.
+// It was 60 s; 20 s still outlasts the 15 s stuck-PTT limit (maxAnalogTX).
+const packetQuiet = 20 * time.Second
 
 type sockState struct {
 	packetAt time.Time // the last analog packet activity
@@ -31,11 +33,18 @@ func (s *Sharer) packetActivity(now time.Time) { s.sock.packetAt = now }
 func (s *Sharer) sockFromWIRESX(text string, now time.Time) (bool, []Out) {
 	k := hri.Key(text)
 	tx := (k == "D1F" || k == "D1E") && !hri.IsAck(text)
+	if s.policy().Priority == PriorityWIRESX {
+		// WIRES-X is the primary user: its overs always reach the radio.
+		if tx {
+			s.preemptAnalog(now)
+		}
+		return false, nil
+	}
 	if !s.sock.muted {
 		if !tx {
 			return false, nil
 		}
-		recent := !s.sock.packetAt.IsZero() && now.Sub(s.sock.packetAt) < packetQuiet
+		recent := !s.sock.packetAt.IsZero() && now.Sub(s.sock.packetAt) < s.policy().PacketQuiet
 		sessions := 0
 		if s.Sessions != nil {
 			sessions = s.Sessions(now)

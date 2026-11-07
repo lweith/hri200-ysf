@@ -1,9 +1,13 @@
 [Unit]
 Description=direwolf on the HRI-200's radio (codec audio, PTT through hri200-ysf -ptt)
-After=network.target sound.target hri200-ysf-proxy.service
+After=network.target sound.target hri200-ysf-proxy.service hri200-txinh.service
+# TXINH: the simulated GPIO line the proxy drives.
+Requires=hri200-txinh.service
 
 [Service]
-ExecStart=/usr/bin/direwolf -t 0 -c /etc/direwolf-hri200.conf
+# /etc/direwolf-hri200.conf with the TXINH line's number, as assigned at boot.
+ExecStartPre=+/usr/local/sbin/hri200-txinh-setup conf
+ExecStart=/usr/bin/direwolf -t 0 -c /run/hri200-txinh/direwolf.conf
 Restart=on-failure
 RestartSec=10
 DynamicUser=yes
@@ -18,6 +22,12 @@ DevicePolicy=closed
 DeviceAllow=char-alsa rw
 # PTT: /dev/hri200-ptt, root:audio 0660 (70-hri200-ptt.rules).
 DeviceAllow=char-hidraw rw
+# TXINH: sysfs GPIO, the line's direction and value root:audio 0664
+# (hri200-txinh-setup), which direwolf rewrites and reads. It also insists on
+# writing the line's number to /sys/class/gpio/export, already exported:
+# here that's /dev/null, so it can't export anything else.
+ReadWritePaths=/sys/devices/platform/gpio-sim.0
+BindPaths=/dev/null:/sys/class/gpio/export
 CapabilityBoundingSet=
 NoNewPrivileges=yes
 ProtectSystem=strict

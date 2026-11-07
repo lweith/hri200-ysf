@@ -1,0 +1,39 @@
+[Unit]
+Description=HRI-200 receive audio to direwolf (UDP 127.0.0.1:7355; read-only USB sniffer)
+Documentation=https://github.com/lweith/hri200-ysf
+After=systemd-modules-load.service
+Before=direwolf-hri200.service
+
+[Service]
+# A second usbmon reader beside hri200-analog.service: records nothing, only
+# forwards the receive audio (48 kHz s16le mono) to direwolf. Nothing is
+# written to the HRI-200. Root only to open /dev/usbmonN (mode 0600).
+ExecStart=/usr/local/bin/hri200-analog-feed -dir "" -udp 127.0.0.1:7355
+Restart=always
+# The devices' numbers change if they re-enumerate; a restart finds them again.
+RestartSec=10
+DevicePolicy=closed
+DeviceAllow=char-usbmon r
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

@@ -49,8 +49,45 @@ const (
 )
 
 // SetMode is the D1M that sets only the radio's WIRES Operation.
-func SetMode(mode byte) string {
-	return hri.D1('M', strings.Repeat("F", 67)+string(mode)+"F"+strings.Repeat(" ", 10)+strings.Repeat("F", 28))
+func SetMode(mode byte) string { return ModeWrite(mode, "") }
+
+// sqltAt is the hang time's offset in a D1M payload (4 digits, ms): what the
+// repeater holds its transmitter up for after an analog reception, during
+// which the proxy won't key it.
+const sqltAt = 85
+
+// ModeWrite sets the radio's WIRES Operation and, unless sqlt is "", its hang
+// time. The mode must always be given: an F there is not "leave alone" to the
+// DR-1X but Analog (2026-11-07 02:54:35, a hang-time write with it F left the
+// repeater in Analog).
+func ModeWrite(mode byte, sqlt string) string {
+	if sqlt == "" {
+		sqlt = "FFFF"
+	}
+	return hri.D1('M', strings.Repeat("F", 67)+string(mode)+"F"+strings.Repeat(" ", 10)+
+		"FFFFFF"+sqlt+strings.Repeat("F", 18))
+}
+
+// hangFor is the hang time to write with a switch to mode, "" for none: with
+// HangZero, none while in Analog for packet, the repeater's own (saved in the
+// cache first, so that a restart still owes it back) on the way back.
+func (s *Sharer) hangFor(mode byte) string {
+	c := s.emu.Cache
+	if mode != analogMode {
+		return c.HangOwed()
+	}
+	if !s.HangZero {
+		return ""
+	}
+	if c.HangOwed() == "" {
+		cur := c.LastSQLT()
+		if cur == "" || cur == "0000" {
+			return "" // unknown, or none already: nothing to put back
+		}
+		c.OweHang(cur)
+		s.logf("proxy: hang time %s ms, none while in Analog", cur)
+	}
+	return "0000"
 }
 
 type analogPhase int
@@ -95,7 +132,7 @@ func (s *Sharer) packetSession(now time.Time) bool {
 	if s.Sessions != nil && s.Sessions(now) > 0 {
 		return true
 	}
-	return !s.sock.packetAt.IsZero() && now.Sub(s.sock.packetAt) < packetQuiet
+	return !s.sock.packetAt.IsZero() && now.Sub(s.sock.packetAt) < s.policy().PacketQuiet
 }
 
 // AnalogDirty reports whether the radio may have been left in Analog.
@@ -123,7 +160,7 @@ func (s *Sharer) setMode(mode byte, now time.Time) {
 	if mode == analogMode {
 		a.dirty = true
 	}
-	s.toRadio(SetMode(mode))
+	s.toRadio(ModeWrite(mode, s.hangFor(mode)))
 }
 
 // PTT takes the modem's PTT.
@@ -179,13 +216,32 @@ func (s *Sharer) PTT(on bool, now time.Time) []Out {
 	return nil
 }
 
+// TXInhibited reports whether PTT would be refused now: the packet modem
+// should hold its frames (TXINH) rather than send them into it.
+func (s *Sharer) TXInhibited(now time.Time) bool {
+	a := &s.analog
+	if s.Write == nil {
+		return true
+	}
+	switch a.phase {
+	case aSwitching, aKeyed, aHang:
+		return false // the modem has the radio, or may key back to back
+	case aRestoring, aSettling:
+		return true
+	}
+	if a.forceDigital {
+		return true
+	}
+	return s.analogBusy(now) != ""
+}
+
 func (s *Sharer) analogBusy(now time.Time) string {
 	switch {
 	case s.relay.on:
 		return "transmitting a client's over"
 	case s.radio.Receiving():
 		return "receiving"
-	case s.wiresxBusy(now):
+	case s.wiresxBusy(now) || s.wiresxRecent(now):
 		return "WIRES-X"
 	case s.radio != "" && !s.radio.Idle():
 		// Including the repeater's hang after repeating an analog reception
@@ -292,6 +348,14 @@ func (s *Sharer) analogFromRadio(text string, now time.Time) ([]Out, bool) {
 		case a.phase == aRestoring && mode == digitalMode:
 			s.logf("proxy: repeater back in Digital")
 			a.phase, a.at, a.dirty = aSettling, now, false
+			if owed := s.emu.Cache.HangOwed(); owed != "" {
+				if ok && len(m.Payload) >= sqltAt+4 && m.Payload[sqltAt:sqltAt+4] == owed {
+					s.logf("proxy: hang time back to %s ms", owed)
+					s.emu.Cache.OweHang("")
+				} else {
+					s.logf("proxy: the repeater didn't take the hang time back (%s ms); written again next time", owed)
+				}
+			}
 		}
 		return nil, true
 	}
@@ -362,7 +426,7 @@ func (s *Sharer) analogTick(now time.Time) []Out {
 		}
 	case aStay:
 		if !s.packetSession(now) && s.radio.Idle() {
-			s.logf("proxy: packet quiet for %v: switching the repeater back to Digital", packetQuiet)
+			s.logf("proxy: packet quiet for %v: switching the repeater back to Digital", s.policy().PacketQuiet)
 			a.phase, a.tries = aRestoring, 1
 			s.setMode(digitalMode, now)
 		}

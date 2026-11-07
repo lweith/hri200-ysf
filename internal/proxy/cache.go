@@ -29,11 +29,17 @@ type Cache struct {
 	// Mode is the radio's WIRES Operation as it last echoed it in a D1M
 	// ("0" Analog, "1" Digital), so that a radio left in Analog by a proxy
 	// that stopped or crashed mid-session is switched back on the next start.
-	Mode  string `json:"mode,omitempty"`
-	dirty bool
+	Mode string `json:"mode,omitempty"`
+	// SQLT is the repeater's hang time (ms, 4 digits) as it last echoed it.
+	SQLT string `json:"sqlt,omitempty"`
+	// HangRestore is the hang time to put back with the switch to Digital,
+	// "" if none is owed: -hang-zero takes it to 0 while in Analog for packet.
+	HangRestore string `json:"hang_restore,omitempty"`
+	dirty       bool
 }
 
-// NoteMode records the WIRES Operation from a D1M the radio sent.
+// NoteMode records the WIRES Operation and the hang time from a D1M the
+// radio sent.
 func (c *Cache) NoteMode(text string) {
 	m, ok := hri.Parse(text)
 	if !ok || m.Cmd != 'M' || len(m.Payload) <= 67 {
@@ -43,10 +49,60 @@ func (c *Cache) NoteMode(text string) {
 	if mode != "0" && mode != "1" {
 		return
 	}
+	sqlt := ""
+	if len(m.Payload) >= sqltAt+4 && isDigits(m.Payload[sqltAt:sqltAt+4]) {
+		sqlt = m.Payload[sqltAt : sqltAt+4]
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.Mode != mode {
+	if c.Mode != mode || sqlt != "" && c.SQLT != sqlt {
 		c.Mode = mode
+		if sqlt != "" {
+			c.SQLT = sqlt
+		}
+		c.Updated = time.Now().UTC()
+		c.dirty = true
+	}
+}
+
+func isDigits(s string) bool {
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// LastSQLT is the hang time the radio last echoed, "" if never seen.
+func (c *Cache) LastSQLT() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.SQLT
+}
+
+// HangOwed is the hang time owed back to the radio, "" if none.
+func (c *Cache) HangOwed() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.HangRestore
+}
+
+// OweHang records the hang time to put back ("" when it is back).
+func (c *Cache) OweHang(sqlt string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.HangRestore != sqlt {
+		c.HangRestore = sqlt
 		c.Updated = time.Now().UTC()
 		c.dirty = true
 	}
