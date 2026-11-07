@@ -1,0 +1,35 @@
+[Unit]
+Description=Fake HRI-200 audio codec for the WIRES-X guest (usbredir on 127.0.0.1:7373; silence in, playback discarded)
+Documentation=https://github.com/lweith/hri200-ysf
+Before=libvirtd.service virtqemud.service
+
+[Service]
+ExecStart=/usr/local/bin/hri200-fakecodec -listen 127.0.0.1:7373
+Restart=always
+RestartSec=2
+DynamicUser=yes
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_INET AF_INET6
+PrivateDevices=yes
+PrivateNetwork=no
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

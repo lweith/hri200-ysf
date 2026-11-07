@@ -1,0 +1,6 @@
+<redirdev bus='usb' type='tcp'>
+  <source mode='connect' host='127.0.0.1' service='7373'>
+    <reconnect enabled='yes' timeout='5'/>
+  </source>
+  <address type='usb' bus='0' port='2'/>
+</redirdev>
