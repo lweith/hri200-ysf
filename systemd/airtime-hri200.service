@@ -1,0 +1,37 @@
+[Unit]
+Description=airtime: channel use by callsign-SSID on the HRI-200's radio (from direwolf-hri200)
+Documentation=https://github.com/lweith/hamnews
+After=direwolf-hri200.service
+Wants=direwolf-hri200.service
+
+[Service]
+ExecStart=/usr/local/bin/airtime -agw 127.0.0.1:8000 -http :8075 -pcap /var/lib/airtime-hri200/trace.pcap
+Restart=on-failure
+RestartSec=15
+DynamicUser=yes
+StateDirectory=airtime-hri200
+# Page and /metrics: this host and yakspeed (Grafana) only.
+IPAddressDeny=any
+IPAddressAllow=localhost 10.99.0.4
+RestrictAddressFamilies=AF_INET AF_INET6
+PrivateDevices=yes
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
