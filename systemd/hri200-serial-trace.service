@@ -1,0 +1,18 @@
+[Unit]
+Description=Ring capture of the HRI-200's serial traffic (usbmon bulk transfers on its bus)
+After=systemd-modules-load.service
+
+[Service]
+# Bulk transfers only (usbmon header byte 9 = 3): the serial device's, not the
+# codec's isochronous audio. 20 files of 10 MB, a few days of traffic. Read
+# with hrimsgs.py. The bus is where the HRI-200 is plugged in (lsusb).
+ExecStart=/usr/bin/tcpdump -q -n -Z root -i usbmon3 -U -C 10 -W 20 -w /var/lib/hri200-serial-trace/hri200.pcap link[9] = 3
+StateDirectory=hri200-serial-trace
+Restart=always
+RestartSec=10
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
