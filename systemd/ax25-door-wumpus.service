@@ -1,0 +1,35 @@
+[Unit]
+Description=Hunt the Wumpus over AX.25 (ax25-door on direwolf-hri200's AGW port)
+After=direwolf-hri200.service
+Wants=direwolf-hri200.service
+
+[Service]
+ExecStart=/usr/local/bin/ax25-door -agw 127.0.0.1:8000 -call KN6FLN-11 -banner "W8HHF/R wumpus door. Answer n to skip the instructions (2 kB, about 20 s on the air). ^D or Q to leave." /usr/games/wump
+Restart=always
+RestartSec=10
+DynamicUser=yes
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# /dev/ptmx and a private devpts for the games' ptys.
+PrivateDevices=yes
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
