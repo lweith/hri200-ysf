@@ -86,3 +86,35 @@ func TestDetachedEndsWhatWasUnderWay(t *testing.T) {
 	wantLine(t, m, `hri200_overs_total{source="air",mode="unknown"} 1`)
 	wantLine(t, m, `hri200_attached 0`)
 }
+
+func TestPacketTransmission(t *testing.T) {
+	var tr Tracker
+	at := 0
+	for _, s := range []hri.State{"20000", "00000", "00000", "00000", "24002"} {
+		tr.StateFrom(s, ms(at), Packet)
+		at += 100
+	}
+	m := tr.metrics(ms(at))
+	wantLine(t, m, `hri200_keyed_seconds_total{source="packet",mode="analog"} 0.400`)
+	wantLine(t, m, `hri200_overs_total{source="packet",mode="analog"} 1`)
+	wantLine(t, m, `hri200_overs_total{source="wiresx",mode="digital"} 0`)
+}
+
+// Analog receptions by content: one with a frame decoded just after it ended
+// (the modem's audio lags), one with none.
+func TestAnalogContent(t *testing.T) {
+	var tr Tracker
+	at := play(&tr, 0, false, "0A017", "0A017", "0A017", "0A017", "0A017", "04007") // 0.5 s
+	tr.Frame(ms(at + 400))
+	at = play(&tr, at+5000, false, "0A017", "0A017", "0A017", "04007") // 0.3 s, voice
+	m := tr.metrics(ms(at + 1000))
+	wantLine(t, m, `hri200_air_analog_overs_total{content="packet"} 1`)
+	wantLine(t, m, `hri200_air_analog_overs_total{content="voice"} 0`) // not filed yet
+	m = tr.metrics(ms(at + frameLateMs))
+	wantLine(t, m, `hri200_air_analog_seconds_total{content="packet"} 0.500`)
+	wantLine(t, m, `hri200_air_analog_seconds_total{content="voice"} 0.300`)
+	wantLine(t, m, `hri200_air_analog_overs_total{content="voice"} 1`)
+	wantLine(t, m, `hri200_overs_total{source="air",mode="analog"} 2`)
+}
+
+var frameLateMs = int(frameLate / time.Millisecond)

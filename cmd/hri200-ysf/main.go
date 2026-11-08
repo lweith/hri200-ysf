@@ -170,6 +170,9 @@ func runProxy(refl *reflector.Reflector, b *bridge.Bridge, cache *proxy.Cache) {
 		Verbose:    *verbose,
 		Transmit:   *transmit,
 	}
+	if *metrics != "" {
+		p.Usage = &usage.Tracker{}
+	}
 	if *ptt {
 		dev, err := cm108.Open("HRI-200 PTT (hri200-ysf)")
 		if err != nil {
@@ -186,6 +189,9 @@ func runProxy(refl *reflector.Reflector, b *bridge.Bridge, cache *proxy.Cache) {
 		log.Printf("ptt: fake CM108 for direwolf (GPIO %d)", dev.GPIO)
 		if *agwMon != "" {
 			tr := &ax25mon.Tracker{Log: log.Printf}
+			if p.Usage != nil {
+				tr.OnFrame = p.Usage.Frame
+			}
 			p.Sessions = func(now time.Time) int { return tr.Active(now) }
 			go tr.Run(*agwMon)
 		}
@@ -201,7 +207,6 @@ func runProxy(refl *reflector.Reflector, b *bridge.Bridge, cache *proxy.Cache) {
 		}
 	}
 	if *metrics != "" {
-		p.Usage = &usage.Tracker{}
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", p.Usage)
 		ln, err := net.Listen("tcp", *metrics)

@@ -222,7 +222,14 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 			if pm, ok := hri.Parse(m.text); ok {
 				p.Bridge.Handle(bridge.Radio, pm, m.at)
 				if st, ok := hri.ParseState(pm); ok && p.Usage != nil {
-					p.Usage.State(st, m.at, share != nil && share.Relaying())
+					src := usage.WIRESX
+					switch {
+					case share != nil && share.PacketKeyed():
+						src = usage.Packet
+					case share != nil && share.Relaying():
+						src = usage.Hotspot
+					}
+					p.Usage.StateFrom(st, m.at, src)
 				}
 			}
 			if hri.Key(m.text) == "D1M" {
