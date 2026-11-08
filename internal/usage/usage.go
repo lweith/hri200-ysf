@@ -2,15 +2,19 @@
 // reports, and serves the totals as Prometheus metrics.
 //
 // Every over has a source: received off the air from the repeater, or
-// transmitted by the radio, for WIRES-X (room traffic) or for the proxy (a
-// hotspot client's over). And a mode: analog or digital.
+// transmitted by the radio, for WIRES-X (room traffic), for the proxy (a
+// hotspot client's over), or for a packet modem (direwolf, keyed in Analog).
+// And a mode: analog or digital.
 //
 // A reception lasts from the first receive state ("?A???") to the first state
 // that isn't one. Its mode is the receive state's last character: '7' analog,
 // '8' digital, others ("0A010") not known yet. A transmission lasts from the
 // first transmit state ("?0???": 20000, 00000, 00004, 00002) to the first that
-// isn't one, as the radio unkeys (24002, 23002). Transmissions are digital:
-// WIRES-X and the proxy send the radio C4FM.
+// isn't one, as the radio unkeys (24002, 23002). WIRES-X and the proxy send
+// the radio C4FM; the packet modem's transmissions are analog.
+//
+// An analog reception is also told apart by what it carried: packet if the
+// packet modem decoded an AX.25 frame during it (Frame), else voice.
 package usage
 
 import (
@@ -27,24 +31,36 @@ const (
 	Air     = "air"     // received from the repeater
 	WIRESX  = "wiresx"  // transmitted: room traffic WIRES-X sent the radio
 	Hotspot = "hotspot" // transmitted: a client's over the proxy relayed
+	Packet  = "packet"  // transmitted: the packet modem's, keyed in Analog
 
 	Analog  = "analog"
 	Digital = "digital"
 	Unknown = "unknown" // ended before the radio reported its mode
 )
 
+// Contents of analog receptions.
+const (
+	Voice     = "voice"  // no frame decoded: voice, a kerchunk, noise
+	PacketRx  = "packet" // the packet modem decoded a frame during it
+	frameLate = 3 * time.Second
+)
+
+var contents = []string{PacketRx, Voice}
+
 type kind struct{ source, mode string }
 
 // kinds are the series served, always, so each starts at zero.
 var kinds = []kind{
 	{Air, Analog}, {Air, Digital}, {Air, Unknown},
-	{WIRESX, Digital}, {Hotspot, Digital},
+	{WIRESX, Digital}, {Hotspot, Digital}, {Packet, Analog},
 }
 
 type over struct {
-	on    bool
-	kind  kind
-	start time.Time
+	on     bool
+	kind   kind
+	start  time.Time
+	end    time.Time
+	packet bool // a frame was decoded during it
 }
 
 // Tracker times overs. Its methods may be called from any goroutine.
@@ -54,6 +70,11 @@ type Tracker struct {
 	rx, tx   over
 	seconds  map[kind]float64 // ended overs
 	count    map[kind]int
+	// Analog receptions by content. An ended one waits frameLate for a
+	// frame decoded as it ended (the modem's audio lags the radio's states).
+	pending  []over
+	cSeconds map[string]float64
+	cCount   map[string]int
 }
 
 func (t *Tracker) end(o *over, at time.Time) {
@@ -61,11 +82,36 @@ func (t *Tracker) end(o *over, at time.Time) {
 		return
 	}
 	o.on = false
+	o.end = at
 	if t.seconds == nil {
 		t.seconds, t.count = map[kind]float64{}, map[kind]int{}
 	}
 	t.seconds[o.kind] += at.Sub(o.start).Seconds()
 	t.count[o.kind]++
+	if o.kind == (kind{Air, Analog}) {
+		t.pending = append(t.pending, *o)
+	}
+}
+
+// settle files analog receptions ended more than frameLate ago by content.
+func (t *Tracker) settle(now time.Time) {
+	keep := t.pending[:0]
+	for _, o := range t.pending {
+		if now.Sub(o.end) < frameLate {
+			keep = append(keep, o)
+			continue
+		}
+		if t.cSeconds == nil {
+			t.cSeconds, t.cCount = map[string]float64{}, map[string]int{}
+		}
+		c := Voice
+		if o.packet {
+			c = PacketRx
+		}
+		t.cSeconds[c] += o.end.Sub(o.start).Seconds()
+		t.cCount[c]++
+	}
+	t.pending = keep
 }
 
 func modeOf(s hri.State) string {
@@ -81,12 +127,23 @@ func modeOf(s hri.State) string {
 // State notes a state the radio reported at at. relaying says whether the
 // proxy is transmitting a client's over, which names a transmission's source.
 func (t *Tracker) State(s hri.State, at time.Time, relaying bool) {
+	src := WIRESX
+	if relaying {
+		src = Hotspot
+	}
+	t.StateFrom(s, at, src)
+}
+
+// StateFrom is State with a transmission's source given: WIRESX, Hotspot or
+// Packet. It names one only as it starts.
+func (t *Tracker) StateFrom(s hri.State, at time.Time, source string) {
 	if len(s) != 5 {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.attached = true
+	t.settle(at)
 	if s[1] == 'A' {
 		if !t.rx.on {
 			t.rx = over{on: true, kind: kind{Air, Unknown}, start: at}
@@ -99,14 +156,31 @@ func (t *Tracker) State(s hri.State, at time.Time, relaying bool) {
 	}
 	if s[1] == '0' {
 		if !t.tx.on {
-			src := WIRESX
-			if relaying {
-				src = Hotspot
+			mode := Digital
+			if source == Packet {
+				mode = Analog
 			}
-			t.tx = over{on: true, kind: kind{src, Digital}, start: at}
+			t.tx = over{on: true, kind: kind{source, mode}, start: at}
 		}
 	} else {
 		t.end(&t.tx, at)
+	}
+}
+
+// Frame notes that the packet modem decoded a frame off the air at at: the
+// analog reception under way, or one that ended within frameLate, carried
+// packet.
+func (t *Tracker) Frame(at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.rx.on {
+		t.rx.packet = true
+	}
+	for i := range t.pending {
+		o := &t.pending[i]
+		if !at.Before(o.start) && at.Sub(o.end) < frameLate {
+			o.packet = true
+		}
 	}
 }
 
@@ -137,6 +211,7 @@ func (t *Tracker) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 func (t *Tracker) metrics(now time.Time) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.settle(now)
 	keyed := func(k kind) bool {
 		return (t.rx.on && t.rx.kind == k) || (t.tx.on && t.tx.kind == k)
 	}
@@ -168,6 +243,16 @@ func (t *Tracker) metrics(now time.Time) string {
 			v = 1
 		}
 		put("hri200_keyed{%s} %d\n", labels(k), v)
+	}
+	put("# HELP hri200_air_analog_seconds_total Analog receptions' time by content: packet (the packet modem decoded a frame) or voice. Filed %v after each ends.\n", frameLate)
+	put("# TYPE hri200_air_analog_seconds_total counter\n")
+	for _, c := range contents {
+		put("hri200_air_analog_seconds_total{content=%q} %.3f\n", c, t.cSeconds[c])
+	}
+	put("# HELP hri200_air_analog_overs_total Analog receptions by content: packet or voice.\n")
+	put("# TYPE hri200_air_analog_overs_total counter\n")
+	for _, c := range contents {
+		put("hri200_air_analog_overs_total{content=%q} %d\n", c, t.cCount[c])
 	}
 	put("# HELP hri200_attached Whether the HRI-200 is attached.\n")
 	put("# TYPE hri200_attached gauge\n")

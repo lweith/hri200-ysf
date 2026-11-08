@@ -34,6 +34,9 @@ const (
 // Tracker is the set of open sessions.
 type Tracker struct {
 	Log func(format string, args ...any)
+	// OnFrame, if set, is told of every frame received off the air (when
+	// direwolf hands it over), for usage's packet/voice split.
+	OnFrame func(at time.Time)
 
 	mu       sync.Mutex
 	sessions map[string]time.Time // "A<>B" (sorted) -> last frame
@@ -166,7 +169,11 @@ func (t *Tracker) run(addr string) error {
 		switch {
 		case f.Kind == 'K' && len(f.Data) > 1:
 			// Raw: a KISS command byte (port << 4), then the frame.
-			t.Frame(f.Data[1:], time.Now())
+			now := time.Now()
+			t.Frame(f.Data[1:], now)
+			if t.OnFrame != nil {
+				t.OnFrame(now)
+			}
 		case f.Kind == 'T':
 			t.Own(f.From, f.To, string(f.Data))
 		}

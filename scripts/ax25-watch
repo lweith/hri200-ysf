@@ -1,0 +1,39 @@
+#!/bin/bash
+# Every AX.25 frame on the W8HHF/R link, both directions, in full: a summary
+# line and a hex dump of the whole frame (addresses, control, PID, info).
+#
+# Each frame is shown as the far end decoded it off the air, raw from
+# direwolf's AGW port:
+#   tmra | frames tmra heard (from your station): airtime-hri200's trace
+#   yak  | frames yakspeed heard (from tmra and the doors): a trace taken here
+#          by a local airtime on hn-direwolf-9700's AGW port, for this run
+# A frame that neither end decoded isn't shown: it never made it.
+#
+# The link is modulo 128 (v2.2), which Wireshark's AX.25 dissector doesn't
+# do: its N(S)/N(R) and "Unknown" are wrong for I and S frames; the hex isn't.
+#
+#   ax25-watch          from now on
+#   ax25-watch 600      also the last 600 s
+set -u
+tmra=tmra-pncsrv.lan.pnc.int.w8hhf.org
+agent=/home/lweith/.ssh/agent/s.cOJ68MNi9k.agent.tl29k8AL8Q
+airtime=/var/tmp/hn-hri-deploy/airtime
+yakpcap=/var/tmp/hn-hri-deploy/yak-trace.pcap
+since=$(( $(date +%s) - ${1:-0} ))
+
+trap 'kill 0' EXIT INT TERM
+
+show() { # tag
+	tshark -l -n -r - -t ud -x -Y "frame.time_epoch >= $since" 2>/dev/null |
+		sed -u -e "s/^/$1 | /"
+}
+
+rm -f "$yakpcap"
+"$airtime" -agw 127.0.0.1:8000 -http "" -pcap "$yakpcap" 2>/dev/null &
+until [ -s "$yakpcap" ]; do sleep 0.2; done
+tail -c +1 -f "$yakpcap" | show "yak " &
+
+ssh -o IdentityAgent="$agent" -o StrictHostKeyChecking=yes "$tmra" \
+	/usr/bin/sudo tail -c +1 -f /var/lib/private/airtime-hri200/trace.pcap | show tmra &
+
+wait

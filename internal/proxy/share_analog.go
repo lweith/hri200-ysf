@@ -125,6 +125,10 @@ func (s *Sharer) Analog() bool { return s.analog.phase != aIdle }
 // radio: not when it is only left in Analog between a session's transmissions.
 func (s *Sharer) analogTX() bool { return s.Analog() && s.analog.phase != aStay }
 
+// PacketKeyed reports whether the proxy has keyed the radio for the packet
+// modem: a transmission starting now is the modem's.
+func (s *Sharer) PacketKeyed() bool { return s.analog.phase == aKeyed }
+
 // packetSession reports whether the channel is in use for packet: a session
 // open, or analog packet activity within packetQuiet. The radio stays in
 // Analog, and room traffic off it, for as long.
