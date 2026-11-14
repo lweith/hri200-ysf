@@ -172,6 +172,43 @@ func TestEmulatorInjection(t *testing.T) {
 	}
 }
 
+// A hotspot's short DT (a radio without a position, as captured 2026-11-14)
+// goes to WIRES-X as the HRI-200 sends it: cut after its end and sum, in a D1G
+// of 0x52 characters, not padded out to 20 bytes.
+func TestEmulatorShortDT(t *testing.T) {
+	e := &Emulator{Cache: testCache()}
+	var csd1, csd2 [20]byte
+	copy(csd1[:], "*****EBKrQKN6FLN/H  ")
+	copy(csd2[:], "                    ")
+	fich := ysf.FICH{CS: 2, FT: 7, DT: ysf.DTVDMode2, FI: ysf.FIHeader}
+	var src [10]byte
+	copy(src[:], "KN6FLN/H  ")
+	e.Inject(ysf.HeaderFrame(fich, csd1, csd2), src, false, ms(0))
+
+	fich.FI = ysf.FICommunications
+	var voice [5][ysf.VoiceBlockLength]byte
+	halves := map[byte][10]byte{
+		6: {0x17, 0x22, 0x61, 0x5F, 0x33, 0x03, 0x2F, 0, 0, 0},
+		7: {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '},
+	}
+	var gs []string
+	for i := range 9 {
+		fich.FN = byte(i % 8)
+		dch := halves[fich.FN]
+		for _, s := range texts(e.Inject(ysf.VDMode2Frame(fich, dch, voice), src, false, ms(100*(i+1)))) {
+			if hri.Key(s) == "D1G" {
+				gs = append(gs, s)
+			}
+		}
+	}
+	if len(gs) != 1 {
+		t.Fatalf("%d D1G", len(gs))
+	}
+	if !strings.HasPrefix(gs[0], "D1G0052") || !strings.HasSuffix(gs[0], "1722615F33032F") {
+		t.Errorf("D1G = %q, want a 0x52 payload ending in the DT through its sum", gs[0])
+	}
+}
+
 func TestInjectionYieldsToWIRESX(t *testing.T) {
 	e := &Emulator{Cache: testCache()}
 	e.Request(hri.D1('E', hri.VoicePayload(5, [5][13]byte{})), ms(0))

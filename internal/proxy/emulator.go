@@ -225,7 +225,7 @@ func (e *Emulator) Inject(frame []byte, source [10]byte, end bool, now time.Time
 	rx.frames++
 	out = append(out, Out{hri.D1('R', hri.VoicePayload(uint16(5*rx.frames), ysf.VoiceBlocks(frame))), now})
 	if rx.frames%8 == 7 { // as captured: after the 7th, 15th, ... voice message
-		out = append(out, Out{hri.D1('G', hri.DataPayload(hri.RadioPrefix, rx.csd1, rx.csd2, rx.csd3, rx.dt)), now})
+		out = append(out, Out{hri.D1('G', hri.RadioDataPayload(hri.RadioPrefix, rx.csd1, rx.csd2, rx.csd3, rx.dt)), now})
 	}
 	if end {
 		out = append(out, e.endRx(now)...)

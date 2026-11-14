@@ -91,24 +91,58 @@ func DataPayload(prefix string, csd1, csd2, csd3 [20]byte, dt [20]byte) string {
 	return prefix + string(csd1[:]) + string(csd2[:]) + string(csd3[:]) + strings.ToUpper(hex.EncodeToString(dt[:]))
 }
 
+// RadioDataPayload is a D1G payload as the HRI-200 sends it for a station its
+// radio receives: as DataPayload, but with the DT data only through its end,
+// an 03 and the 8-bit sum of every byte before the sum (see DTLen). A radio
+// without a position sends a short DT ("22 61 5F 33", 7 bytes with the
+// counter, end and sum) and the HRI-200 a D1G of 0x52 characters; with one,
+// 20 bytes and 0x6C. Captured 2026-11-14 from an FT-5D: WIRES-X shows a
+// reception whose short DT is padded out to 20 bytes as local, but does not
+// send it to the room.
+func RadioDataPayload(prefix string, csd1, csd2, csd3 [20]byte, dt [20]byte) string {
+	return prefix + string(csd1[:]) + string(csd2[:]) + string(csd3[:]) +
+		strings.ToUpper(hex.EncodeToString(dt[:DTLen(dt)]))
+}
+
+// DTLen is the length of the DT data in dt: through the last 03 whose next
+// byte is the 8-bit sum of every byte up to and including that 03, or all 20
+// bytes if there is none.
+func DTLen(dt [20]byte) int {
+	for i := len(dt) - 2; i >= 1; i-- {
+		if dt[i] != 0x03 {
+			continue
+		}
+		var sum byte
+		for _, c := range dt[:i+1] {
+			sum += c
+		}
+		if dt[i+1] == sum {
+			return i + 2
+		}
+	}
+	return len(dt)
+}
+
 // Data is a D1G message: the callsign blocks and the DT data of frames 6 and 7.
 type Data struct {
 	CSD1, CSD2, CSD3 [20]byte
-	DT               [20]byte
+	DT               [20]byte // zero after the data, if it was short
 }
 
-// ParseData parses a payload of 0x6C characters: a D1G from either side, or a
-// D1F from WIRES-X, which uses this form instead of the 0x52 header for some
-// transmissions and repeats it every few seconds while they last.
+// ParseData parses a D1G from either side, or a D1F from WIRES-X, which uses
+// this form instead of the 0x52 header for some transmissions and repeats it
+// every few seconds while they last: 0x6C characters, or fewer when the DT
+// data is short (a D1G from the radio, see RadioDataPayload).
 func ParseData(m Message) (Data, bool) {
 	var d Data
-	if (m.Cmd != 'G' && m.Cmd != 'F') || len(m.Payload) != 0x6C {
+	n := len(m.Payload)
+	if (m.Cmd != 'G' && m.Cmd != 'F') || n > 0x6C || n < 70 || n%2 != 0 {
 		return d, false
 	}
 	copy(d.CSD1[:], m.Payload[8:28])
 	copy(d.CSD2[:], m.Payload[28:48])
 	copy(d.CSD3[:], m.Payload[48:68])
-	dt, err := hex.DecodeString(m.Payload[68:108])
+	dt, err := hex.DecodeString(m.Payload[68:])
 	if err != nil {
 		return d, false
 	}
