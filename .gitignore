@@ -1,3 +1,6 @@
 /hri200-ysf
+/wireshark/build/
+/wiresxnet-proxy
+/wiresxnet-tap
 *.pcap
 *.pcapng
