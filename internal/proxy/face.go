@@ -531,14 +531,21 @@ func (f *Face) SetDT(dt [20]byte) {
 // RxVoice plays one voice frame of the reception: as the HRI-200 does, a
 // callsign block repeat before each of the first six, and the data (D1G)
 // after the sixth and every seventh after it.
+//
+// Off the air, the callsigns only once the radio has sent them: a signal
+// too weak for the radio to get the header has none, and the radio says
+// it isn't busy (B0) all through it (2026-11-14 07:20).
 func (f *Face) RxVoice(blocks [5][ysf.VoiceBlockLength]byte, now time.Time) []Out {
 	rx := f.rx
 	if rx == nil {
 		return nil
 	}
 	rx.last = now
-	out := f.Callsigns(now)
-	if k := rx.frames; k < 6 {
+	var out []Out
+	if rx.src != rxAir {
+		out = f.Callsigns(now)
+	}
+	if k := rx.frames; k < 6 && rx.named {
 		block, repeat := k/2+1, k%2+1
 		out = append(out, f.emit(hri.D1('H', hri.CallsignPayload(hri.RadioPrefix, block, repeat, rx.block(block))), now))
 	}

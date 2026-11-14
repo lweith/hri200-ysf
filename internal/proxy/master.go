@@ -177,9 +177,17 @@ type Master struct {
 }
 
 type masterRx struct {
-	on     bool // digital content seen
-	analog bool // analog receive states seen
+	on        bool      // digital content seen
+	analog    bool      // analog receive states seen
+	contentAt time.Time // the last content (D1H, D1R, D1G)
 }
+
+// contentHold: a state that isn't receiving doesn't end a reception this
+// soon after its content. A status reply can be older than the reception's
+// first voice frame (07:20:27: D1R at .336, then "05000" at .340, the
+// receive states only at .482); a reception's last frame is followed by its
+// end states for 0.8 s before an idle one.
+const contentHold = 150 * time.Millisecond
 
 func (m *Master) logf(format string, args ...any) {
 	if m.Log != nil {
@@ -277,7 +285,7 @@ func (m *Master) canTransmit() string {
 		return "recovering"
 	case m.analog.phase != aIdle:
 		return "in Analog for packet"
-	case m.state.Receiving():
+	case m.state.Receiving() || m.state.DigitalReceiving():
 		return "receiving"
 	case m.state != "" && !m.state.Idle():
 		return "in state " + string(m.state)
@@ -361,6 +369,7 @@ func (m *Master) FromRadio(text string, now time.Time) []MasterEvent {
 // rxContent starts a reception at its first receive state, or at its first
 // content if the states were missed.
 func (m *Master) rxContent(now time.Time) []MasterEvent {
+	m.rx.contentAt = now
 	if m.rx.on {
 		return nil
 	}
@@ -376,10 +385,10 @@ func (m *Master) setState(s hri.State, now time.Time) []MasterEvent {
 	if s.Receiving() && s[4] == '7' {
 		m.packetActivity(now)
 	}
-	if s.Receiving() && s[4] != '7' && !m.ours() {
+	if s.DigitalReceiving() && !m.ours() {
 		ev = append(ev, m.rxContent(now)...) // digital: the face starts with it
 	}
-	if !s.Receiving() && m.rx.on {
+	if !s.DigitalReceiving() && m.rx.on && now.Sub(m.rx.contentAt) >= contentHold {
 		m.rx.on = false
 		ev = append(ev, MasterEvent{Kind: RxEnd})
 	}
@@ -389,7 +398,7 @@ func (m *Master) setState(s hri.State, now time.Time) []MasterEvent {
 		m.rx.analog = s[4] == '7'
 		ev = append(ev, MasterEvent{Kind: RxAnalog, State: s})
 	}
-	if t := m.tx; t != nil && t.keyed && !s.Receiving() {
+	if t := m.tx; t != nil && t.keyed && !s.Receiving() && !s.DigitalReceiving() {
 		if !s.Idle() && !t.txSeen {
 			t.txSeen = true
 		}

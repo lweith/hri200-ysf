@@ -60,7 +60,23 @@ func ParseState(m Message) (State, bool) {
 }
 
 // Receiving reports whether a state is one of the receive states ("?A???").
+//
+// The second character is the signal's level, though, not a receive flag:
+// idle reads 1-5 with nothing on the air, a reception anything from 3 to A
+// (traces of 2026-11-13/14). "A" is only a strong signal; see
+// DigitalReceiving.
 func (s State) Receiving() bool { return len(s) == 5 && s[1] == 'A' }
+
+// DigitalReceiving reports whether a state is the radio receiving a digital
+// signal at any level: not transmitting (level 0), not analog (a final 7),
+// and the receive digits set: 010, 018, 038 as it starts, ?08 to the end
+// ("06010", "05038", "04008", "24008"). Seen 2026-11-14 07:20, a weak
+// signal ("05000" "06010" "26010" "06018" "04008" ... "03008" "24008"
+// "04008" "03000") that Receiving had as no reception at all.
+func (s State) DigitalReceiving() bool {
+	return len(s) == 5 && s[1] != '0' && s[4] != '7' &&
+		(s[3] == '1' || s[3] == '3' || s[4] == '8')
+}
 
 // Idle reports whether a state looks idle: not receiving, not transmitting.
 func (s State) Idle() bool {

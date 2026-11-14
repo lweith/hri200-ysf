@@ -208,7 +208,7 @@ func (m *Master) analogBusy(now time.Time) string {
 		return "the radio is being recovered"
 	case m.Transmitting():
 		return "transmitting an over"
-	case m.state.Receiving():
+	case m.state.Receiving() || m.state.DigitalReceiving():
 		return "receiving"
 	case m.WIRESXBusy != nil && m.WIRESXBusy(now):
 		return "WIRES-X"
