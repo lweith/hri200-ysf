@@ -12,7 +12,7 @@ type Priority string
 const (
 	// PriorityPacket: WIRES-X's overs wait out a packet session, which is the
 	// behaviour before the policy existed. Room traffic stays off the repeater
-	// while packet is in use (share_sock.go).
+	// while packet is in use (router.go packetHolds).
 	PriorityPacket Priority = "packet"
 	// PriorityWIRESX: WIRES-X's overs always reach the radio, and go back to
 	// Digital first if packet has it in Analog. Packet waits until WIRES-X has
@@ -45,9 +45,8 @@ func (p Policy) Validate() error {
 	return nil
 }
 
-// policy returns the Sharer's policy, with unset fields at their defaults.
-func (s *Sharer) policy() Policy {
-	p := s.Policy
+// withDefaults returns the policy with unset fields at their defaults.
+func (p Policy) withDefaults() Policy {
 	d := DefaultPolicy()
 	if p.Priority == "" {
 		p.Priority = d.Priority
@@ -59,17 +58,4 @@ func (s *Sharer) policy() Policy {
 		p.WIRESXQuiet = d.WIRESXQuiet
 	}
 	return p
-}
-
-// preemptAnalog returns the radio to Digital so WIRES-X's over can go out,
-// when packet has it held in Analog between transmissions. A packet
-// transmission already keyed is left to finish.
-func (s *Sharer) preemptAnalog(now time.Time) {
-	a := &s.analog
-	if a.phase != aStay && a.phase != aHang {
-		return
-	}
-	s.logf("proxy: WIRES-X transmitting: switching the repeater back to Digital for it")
-	a.phase, a.tries = aRestoring, 1
-	s.setMode(digitalMode, now)
 }

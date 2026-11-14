@@ -100,13 +100,25 @@ func TestProxySwapsHRI200(t *testing.T) {
 	go p.Run(ctx, make(chan YSF))
 	time.Sleep(300 * time.Millisecond) // let it open both ttys
 
-	// Attached: the poll goes through, the HRI-200 answers, the answer comes back.
+	// The master starts the radio as WIRES-X does; it answers as this unit.
+	for _, x := range [][2]string{
+		{"M10", "M10"},
+		{"R6423", capturedR6423},
+		{"D1V0000", capturedVersion},
+		{SetMode(digitalMode), capturedSettings},
+	} {
+		expect(t, hri200, x[0])
+		hri200.Write(hri.Wrap(x[1]))
+	}
+
+	// Attached: the poll goes through, the HRI-200 answers, the answer comes
+	// back. (R6430: a read the startup doesn't make, so not learned yet.)
 	wiresx.Write(hri.Wrap("P010000"))
 	expect(t, hri200, "P010000")
 	hri200.Write(hri.Wrap("B0 0    0000000"))
 	expect(t, wiresx, "B0 0    0000000")
-	wiresx.Write(hri.Wrap("R6423"))
-	expect(t, hri200, "R6423")
+	wiresx.Write(hri.Wrap("R6430"))
+	expect(t, hri200, "R6430")
 	hri200.Write(hri.Wrap("R0303030"))
 	expect(t, wiresx, "R0303030")
 
@@ -114,7 +126,7 @@ func TestProxySwapsHRI200(t *testing.T) {
 	attached.Store(false)
 	hri200.Close()
 	time.Sleep(300 * time.Millisecond)
-	wiresx.Write(hri.Wrap("R6423"))
+	wiresx.Write(hri.Wrap("R6430"))
 	expect(t, wiresx, "R0303030")
 	wiresx.Write(hri.Wrap("P010000"))
 	expect(t, wiresx, "B0 0    0000000")

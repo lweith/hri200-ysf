@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/lweith/hri200-ysf/internal/bridge"
@@ -20,7 +21,10 @@ type YSF struct {
 }
 
 // Proxy connects WIRES-X (Downstream, the USB gadget's tty) to an HRI-200
-// (Upstream, when it is attached).
+// (Upstream, when it is attached), as two state machines that never see each
+// other's messages: the face answers WIRES-X, the master drives the radio,
+// and the router carries content between them (face.go, master.go,
+// router.go).
 type Proxy struct {
 	Downstream string                 // tty WIRES-X talks to, such as /dev/ttyGS0
 	Upstream   func() (string, error) // finds the HRI-200's tty, or errors if absent
@@ -30,27 +34,27 @@ type Proxy struct {
 	Log        func(format string, args ...any)
 	Verbose    bool
 	// Transmit also transmits clients' overs on the HRI-200's radio while it
-	// is attached, so the repeater hears both sides.
+	// is attached, so the repeater hears them.
 	Transmit bool
 	// Usage, if set, times the repeater's overs from the HRI-200's states.
 	Usage *usage.Tracker
 	// PTT, if set, carries a packet modem's PTT: the HRI-200's radio is
-	// switched to Analog and keyed while it is on (see share_analog.go).
+	// switched to Analog and keyed while it is on (see master_analog.go).
 	PTT <-chan bool
 	// Sessions, if set, counts the AX.25 sessions open on the radio's
-	// channel (see share_sock.go).
+	// channel: room traffic stays off the repeater while there are any, with
+	// the packet priority.
 	Sessions func(now time.Time) int
 	// TXInhibit, if set, is told whenever the channel turns busy or clear for
-	// the packet modem: busy wherever PTT would be refused (the repeater
-	// receiving, in its hang or CW ID, WIRES-X transmitting, the HRI-200
-	// away), so that the modem holds its frames rather than send them into a
-	// refused PTT (direwolf's TXINH).
+	// the packet modem (direwolf's TXINH).
 	TXInhibit func(on bool)
-	// HangZero, with PTT: no repeater hang time while in Analog for packet
-	// (Sharer.HangZero).
+	// HangZero, with PTT: no repeater hang time while in Analog for packet.
 	HangZero bool
 	// Policy is the channel's sharing rules (policy.go).
 	Policy Policy
+	// Recover, if set, resets the HRI-200 when it stops behaving (health.go):
+	// level 1 its USB device, 2 its port's power.
+	Recover func(level int) error
 }
 
 func (p *Proxy) logf(format string, args ...any) {
@@ -64,9 +68,7 @@ type msg struct {
 	at   time.Time
 }
 
-// Run proxies until ctx ends. ysfIn carries frames to play to WIRES-X: always
-// while the HRI-200 is absent, and while it is attached whenever the repeater
-// is idle (see Sharer).
+// Run proxies until ctx ends. ysfIn carries frames from YSF clients.
 func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 	down, err := p.Open(p.Downstream)
 	if err != nil {
@@ -85,35 +87,35 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 	upEvents := make(chan *os.File)
 	go p.watchUpstream(ctx, upEvents, upMsgs)
 
-	emu := &Emulator{Cache: p.Cache, Log: p.Log}
-	var match Matcher
-	var up *os.File
-	var share *Sharer // while the HRI-200 is attached
+	r := &router{
+		face:     &Face{Cache: p.Cache, Log: p.Log},
+		bridge:   p.Bridge,
+		log:      p.Log,
+		transmit: p.Transmit,
+		usage:    p.Usage,
+		policy:   p.Policy,
+	}
+	r.face.Forward = func(text string, now time.Time) {
+		if r.master != nil {
+			r.master.Query(text)
+		}
+	}
+	ladder := &Ladder{}
 	send := func(o []Out) {
 		for _, x := range o {
 			if p.Verbose {
-				p.logf("emulated: %.60s", x.Text)
+				p.logf("to WIRES-X: %.60s", x.Text)
 			}
 			outs <- x
 		}
 	}
-	tick := time.NewTicker(50 * time.Millisecond)
+	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 	lastSave := time.Now()
 	defer p.Cache.Save()
-	// The radio may be in Analog: an analog transmission was under way when
-	// the HRI-200 went away. Switched back when it returns.
-	analogDirty := false
 	defer func() {
-		if up != nil && share != nil && share.AnalogDirty() {
-			p.logf("proxy: stopping with the repeater in Analog, switching it back")
-			// The hang time, if owed, goes back too, but stays owed in the
-			// cache until an echo shows it (this process won't see one).
-			for _, text := range []string{pttOff, pttOff, ModeWrite(digitalMode, p.Cache.HangOwed())} {
-				if _, err := up.Write(hri.Wrap(text)); err != nil {
-					p.logf("proxy: writing to HRI-200: %v", err)
-				}
-			}
+		if r.master != nil {
+			r.master.Stop()
 			time.Sleep(300 * time.Millisecond)
 		}
 	}()
@@ -124,7 +126,7 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 		if p.TXInhibit == nil {
 			return
 		}
-		on := share == nil || share.TXInhibited(now)
+		on := r.TXInhibited(now)
 		if inhibitKnown && on == inhibited {
 			return
 		}
@@ -140,7 +142,7 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 		}
 	}()
 
-	p.logf("proxy: WIRES-X on %s, %d cached replies", p.Downstream, p.Cache.Len())
+	p.logf("proxy: WIRES-X on %s, %d cached replies, %s", p.Downstream, p.Cache.Len(), p.Cache.Describe())
 	for {
 		select {
 		case <-ctx.Done():
@@ -150,130 +152,62 @@ func (p *Proxy) Run(ctx context.Context, ysfIn <-chan YSF) error {
 			return errors.New("proxy: lost " + p.Downstream)
 
 		case f := <-upEvents:
-			if f != nil {
-				up = f
-				share = &Sharer{Log: p.Log}
-				share.emu.Log = p.Log
-				share.emu.Cache = p.Cache // answers WIRES-X for the sock
-				share.Sessions = p.Sessions
-				radio := f
-				write := func(text string) {
+			now := time.Now()
+			if f == nil {
+				r.detach(now)
+				p.logf("proxy: HRI-200 gone; WIRES-X sees no difference")
+				_ = p.Cache.Save()
+				continue
+			}
+			radio := f
+			m := &Master{
+				Write: func(text string) {
 					if p.Verbose {
 						p.logf("to radio: %.60s", text)
 					}
 					if _, err := radio.Write(hri.Wrap(text)); err != nil {
 						p.logf("proxy: writing to HRI-200: %v", err)
 					}
-				}
-				if p.Transmit {
-					share.Radio = write
-				}
-				if p.PTT != nil {
-					share.Write = write
-					share.HangZero = p.HangZero
-					share.Policy = p.Policy
-					if analogDirty || p.Cache.LastMode() != "1" || p.Cache.HangOwed() != "" {
-						share.ForceDigital(time.Now())
-					}
-				}
-				if p.Usage != nil {
-					p.Usage.Attached()
-				}
-				p.logf("proxy: HRI-200 attached (%s): passing through", f.Name())
-			} else {
-				up = nil
-				if p.Usage != nil {
-					p.Usage.Detached(time.Now())
-				}
-				if share != nil {
-					analogDirty = share.AnalogDirty()
-					send(share.End(time.Now()))
-					share = nil
-				}
-				match = Matcher{}
-				p.logf("proxy: HRI-200 gone: emulating from %d cached replies", p.Cache.Len())
-				_ = p.Cache.Save()
+				},
+				Log:      p.Log,
+				Cache:    p.Cache,
+				Recover:  p.Recover,
+				Ladder:   ladder,
+				HangZero: p.HangZero,
+				Policy:   p.Policy,
+				Sessions: p.Sessions,
 			}
+			r.attach(m, now)
+			p.logf("proxy: HRI-200 attached (%s)", f.Name())
 
 		case m := <-downMsgs:
 			if p.Verbose {
-				p.logf("network: %.60s", m.text)
+				p.logf("WIRES-X: %.60s", m.text)
 			}
-			if pm, ok := hri.Parse(m.text); ok {
-				p.Bridge.Handle(bridge.Network, pm, m.at)
-			}
-			if up != nil {
-				if pass, answer := share.FromWIRESX(m.text, m.at); !pass {
-					send(answer)
-					continue
-				}
-				match.Request(m.text, m.at)
-				if _, err := up.Write(hri.Wrap(m.text)); err != nil {
-					p.logf("proxy: writing to HRI-200: %v", err)
-				}
-			} else {
-				send(emu.Request(m.text, m.at))
-			}
+			send(r.FromWIRESX(m.text, m.at))
 
 		case m := <-upMsgs:
 			if p.Verbose {
 				p.logf("radio: %.60s", m.text)
 			}
-			if pm, ok := hri.Parse(m.text); ok {
-				p.Bridge.Handle(bridge.Radio, pm, m.at)
-				if st, ok := hri.ParseState(pm); ok && p.Usage != nil {
-					src := usage.WIRESX
-					switch {
-					case share != nil && share.PacketKeyed():
-						src = usage.Packet
-					case share != nil && share.Relaying():
-						src = usage.Hotspot
-					}
-					p.Usage.StateFrom(st, m.at, src)
-				}
-			}
-			if hri.Key(m.text) == "D1M" {
-				p.Cache.NoteMode(m.text)
-			}
-			if req, ok := match.Reply(m.text, m.at); ok {
-				p.Cache.Learn(req, m.text)
-			}
-			if share == nil { // read just before the HRI-200 went away
-				outs <- Out{m.text, m.at}
-				continue
-			}
-			for _, o := range share.FromRadio(m.text, m.at) {
-				outs <- o
-			}
+			send(r.FromRadio(m.text, m.at))
 			inhibit(m.at)
 
 		case on := <-p.PTT:
-			if share != nil {
-				send(share.PTT(on, time.Now()))
-			} else if on {
-				p.logf("proxy: PTT, but the HRI-200 is away")
-			}
+			r.PTT(on, time.Now())
 
 		case y := <-ysfIn:
-			if share != nil {
-				send(share.FromClient(y, time.Now()))
-			} else {
-				send(emu.Inject(y.Frame, y.Source, y.End, time.Now()))
-			}
+			send(r.FromClient(y, time.Now()))
 
 		case now := <-tick.C:
-			p.Bridge.Tick(now)
-			if share != nil {
-				out, packets := share.Tick(now)
-				send(out)
-				for _, pk := range packets {
-					if p.Bridge.Out != nil {
-						p.Bridge.Out(pk)
-					}
+			out, packets := r.Tick(now)
+			send(out)
+			for _, pk := range packets {
+				if p.Bridge.Out != nil {
+					p.Bridge.Out(pk)
 				}
-			} else {
-				send(emu.Tick(now))
 			}
+			p.Bridge.Tick(now)
 			inhibit(now)
 			if now.Sub(lastSave) > 10*time.Second {
 				if err := p.Cache.Save(); err != nil {
@@ -306,8 +240,8 @@ func (p *Proxy) watchUpstream(ctx context.Context, events chan<- *os.File, msgs 
 		select {
 		case <-done:
 		case <-ctx.Done():
-			// Left open: Run may still write to it as it stops (switching
-			// the radio back to Digital). It closes when the process ends.
+			// Left open: Run may still write to it as it stops (unkeying,
+			// switching the radio back to Digital). It closes with the process.
 			return
 		}
 		f.Close()
@@ -341,19 +275,41 @@ func readMessages(r io.Reader, out chan<- msg, done chan<- struct{}) {
 	}
 }
 
-// writeOuts writes messages to WIRES-X in order, each no earlier than its time.
+// outQueue holds messages for WIRES-X in order of their time, and of arrival
+// among equal times.
+type outQueue []Out
+
+func (q *outQueue) push(o Out) {
+	i := sort.Search(len(*q), func(i int) bool { return (*q)[i].At.After(o.At) })
+	*q = append(*q, Out{})
+	copy((*q)[i+1:], (*q)[i:])
+	(*q)[i] = o
+}
+
+// writeOuts writes messages to WIRES-X, each at its time: a poll's answer goes
+// out at once even while a state sequence is still unfolding.
 func writeOuts(ctx context.Context, w io.Writer, outs <-chan Out, logf func(string, ...any)) {
+	var q outQueue
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
 	for {
+		for len(q) > 0 && !time.Now().Before(q[0].At) {
+			if _, err := w.Write(hri.Wrap(q[0].Text)); err != nil {
+				logf("proxy: writing to WIRES-X: %v", err)
+			}
+			q = q[1:]
+		}
+		wait := time.Hour
+		if len(q) > 0 {
+			wait = time.Until(q[0].At)
+		}
+		timer.Reset(wait)
 		select {
 		case <-ctx.Done():
 			return
 		case o := <-outs:
-			if d := time.Until(o.At); d > 0 {
-				sleep(ctx, d)
-			}
-			if _, err := w.Write(hri.Wrap(o.Text)); err != nil {
-				logf("proxy: writing to WIRES-X: %v", err)
-			}
+			q.push(o)
+		case <-timer.C:
 		}
 	}
 }

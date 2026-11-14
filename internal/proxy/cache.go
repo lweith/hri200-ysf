@@ -35,7 +35,28 @@ type Cache struct {
 	// HangRestore is the hang time to put back with the switch to Digital,
 	// "" if none is owed: -hang-zero takes it to 0 while in Analog for packet.
 	HangRestore string `json:"hang_restore,omitempty"`
-	dirty       bool
+	// Settings is the radio's last settings echo (a D1M), what a write the
+	// cache has no echo for is echoed over (identity.go).
+	Settings string `json:"settings,omitempty"`
+	dirty    bool
+}
+
+// LastSettings is the radio's last settings echo, "" if none is known. A
+// cache from before Settings was kept has its echo of the mode write.
+func (c *Cache) LastSettings() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.Settings != "" {
+		return c.Settings
+	}
+	mode := byte(digitalMode)
+	if c.Mode != "" {
+		mode = c.Mode[0]
+	}
+	return c.Replies[SetMode(mode)]
 }
 
 // NoteMode records the WIRES Operation and the hang time from a D1M the
@@ -55,6 +76,11 @@ func (c *Cache) NoteMode(text string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.Settings != text && !strings.Contains(m.Payload, "FFFF") {
+		c.Settings = text
+		c.Updated = time.Now().UTC()
+		c.dirty = true
+	}
 	if c.Mode != mode || sqlt != "" && c.SQLT != sqlt {
 		c.Mode = mode
 		if sqlt != "" {
